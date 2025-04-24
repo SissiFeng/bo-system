@@ -1,6 +1,6 @@
 # Development Progress - Bayesian Optimization System
 
-## 2023-11-20 - Project Initialization (Phase 1)
+## Phase 1
 
 - [x] Created project structure
 - [x] Set up virtual environment
@@ -8,7 +8,7 @@
 - [x] Added basic documentation framework
 - [x] Created unit test structure
 
-## 2023-12-10 - Parameter Space Definition (Phase 2)
+## Phase 2
 
 - [x] Implemented ParameterSpace class
 - [x] Added support for:
@@ -20,7 +20,7 @@
 - [x] Added API endpoints for parameter space creation/retrieval
 - [x] Wrote unit tests for parameter space functionality
 
-## 2024-01-15 - Initial Experiment Design (Phase 3)
+## Phase 3
 
 - [x] Implemented multiple design generators:
   - [x] Random design
@@ -31,7 +31,7 @@
 - [x] Added API endpoints for retrieving design points
 - [x] Created unit tests for design generation
 
-## 2024-02-20 - Core BO Engine (Phase 4)
+## Core BO Engine (Phase 4)
 
 - [x] Implemented surrogate models:
   - [x] BaseModel (abstract)
@@ -52,7 +52,7 @@
   - [x] Getting next suggested design points
   - [x] Prediction with the current model
 
-## 2024-03-10 - Task Management (Phase 5)
+## Task Management (Phase 5)
 
 - [x] Implemented task state management
 - [x] Added persistence for task data (using JSON files)
