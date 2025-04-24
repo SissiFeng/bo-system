@@ -1,0 +1,39 @@
+# Core dependencies
+fastapi>=0.95.0
+uvicorn>=0.21.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+
+# Bayesian Optimization dependencies
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.2.0
+scipy>=1.10.0
+joblib>=1.2.0
+pymoo>=0.6.0  # For multi-objective optimization
+gpytorch>=1.9.0  # Modern GP implementation
+botorch>=0.8.0  # Bayesian optimization library
+
+# Visualization (optional for backend, useful for notebooks)
+matplotlib>=3.7.0
+seaborn>=0.12.0
+plotly>=5.13.0
+
+# Utility
+pyyaml>=6.0
+pyDOE>=0.3.8  # For Latin Hypercube Sampling
+
+# Testing
+pytest>=7.3.0
+pytest-cov>=4.0.0
+
+# Async and distributed processing (optional)
+celery>=5.2.7
+redis>=4.5.4
+
+# WebSocket
+websockets>=11.0.0
+
+# Storage
+sqlalchemy>=2.0.0  # For database storage (optional)
+aiosqlite>=0.18.0  # Async SQLite (optional) 

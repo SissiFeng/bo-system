@@ -1,0 +1,607 @@
+from fastapi import APIRouter, HTTPException, Depends, Query, Path, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, FileResponse
+from typing import List, Dict, Any, Optional
+import uuid
+import json
+import time
+from datetime import datetime
+import logging
+import os
+from pathlib import Path
+import asyncio
+
+from app.core.config import get_settings
+from app.core.logger import setup_logger
+from app.api import schema
+from bo_engine.parameter_space import ParameterSpace
+from bo_engine.design_generator import create_design_generator, DesignType
+from bo_engine.utils import generate_unique_id
+
+# Import core BO engine components
+# These will be implemented in Phase 2-4
+# from bo_engine.parameter_space import ParameterSpace
+# from bo_engine.design_generator import DesignGenerator
+# from bo_engine.optimizer import Optimizer
+
+# Setup
+settings = get_settings()
+logger = setup_logger("api")
+
+# Create router
+router = APIRouter()
+
+# In-memory storage for tasks (temporary, will be replaced with proper persistence)
+# In a production system, this would be a database
+tasks = {}
+parameter_spaces = {}
+strategies = {}
+designs = {}
+results = {}
+
+# Utility functions
+def generate_id() -> str:
+    """Generate a unique ID."""
+    return str(uuid.uuid4())
+
+def generate_error_response(status_code: int, message: str) -> JSONResponse:
+    """Generate an error response."""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": message},
+    )
+
+# ----- 1. Parameter Space Configuration API -----
+
+@router.post("/parameter-space", response_model=schema.ParameterSpaceResponse)
+async def create_parameter_space(data: schema.ParameterSpaceCreate):
+    """
+    Create a new optimization task by defining a parameter space.
+    """
+    logger.info(f"Creating parameter space: {data.name}")
+    
+    # Generate a unique task ID
+    task_id = generate_id()
+    
+    # Store the parameter space (in-memory for now)
+    now = datetime.now()
+    parameter_spaces[task_id] = schema.ParameterSpaceRead(
+        **data.dict(),
+        task_id=task_id,
+        created_at=now,
+        updated_at=now,
+    )
+    
+    # Create a task entry
+    tasks[task_id] = {
+        "task_id": task_id,
+        "name": data.name,
+        "status": schema.TaskStatus.CREATED,
+        "created_at": now,
+        "updated_at": now,
+    }
+    
+    # Create task directory
+    task_dir = Path(settings.TASK_DIR) / task_id
+    os.makedirs(task_dir, exist_ok=True)
+    
+    # Save parameter space to file (temporary persistence)
+    with open(task_dir / "parameter_space.json", "w") as f:
+        json.dump(parameter_spaces[task_id].dict(), f, default=str)
+    
+    return schema.ParameterSpaceResponse(
+        task_id=task_id,
+        status=schema.TaskStatus.CREATED,
+        message=f"Parameter space '{data.name}' created successfully",
+    )
+
+
+@router.get("/parameter-space/{task_id}", response_model=schema.ParameterSpaceRead)
+async def get_parameter_space(task_id: str = Path(..., description="Task ID")):
+    """
+    Get the parameter space for a specific task.
+    """
+    if task_id not in parameter_spaces:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    return parameter_spaces[task_id]
+
+
+@router.put("/parameter-space/{task_id}", response_model=schema.ParameterSpaceResponse)
+async def update_parameter_space(
+    data: schema.ParameterSpaceCreate,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """
+    Update an existing parameter space.
+    """
+    if task_id not in parameter_spaces:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # Update parameter space
+    now = datetime.now()
+    parameter_spaces[task_id] = schema.ParameterSpaceRead(
+        **data.dict(),
+        task_id=task_id,
+        created_at=parameter_spaces[task_id].created_at,
+        updated_at=now,
+    )
+    
+    # Update task
+    tasks[task_id]["name"] = data.name
+    tasks[task_id]["updated_at"] = now
+    
+    # Update file
+    task_dir = Path(settings.TASK_DIR) / task_id
+    with open(task_dir / "parameter_space.json", "w") as f:
+        json.dump(parameter_spaces[task_id].dict(), f, default=str)
+    
+    return schema.ParameterSpaceResponse(
+        task_id=task_id,
+        status=schema.TaskStatus.CREATED,
+        message=f"Parameter space updated successfully",
+    )
+
+# ----- 2. Optimization Strategy API -----
+
+@router.post("/strategy/{task_id}", response_model=dict)
+async def set_strategy(
+    strategy: schema.StrategyCreate,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """
+    Configure the optimization algorithm and strategy.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # Save strategy
+    now = datetime.now()
+    strategies[task_id] = schema.StrategyRead(
+        **strategy.dict(),
+        task_id=task_id,
+        created_at=now,
+        updated_at=now,
+    )
+    
+    # Save to file
+    task_dir = Path(settings.TASK_DIR) / task_id
+    with open(task_dir / "strategy.json", "w") as f:
+        json.dump(strategies[task_id].dict(), f, default=str)
+    
+    return {"message": "Strategy set successfully"}
+
+
+@router.get("/strategy/{task_id}", response_model=schema.StrategyRead)
+async def get_strategy(task_id: str = Path(..., description="Task ID")):
+    """
+    Get the current optimization strategy.
+    """
+    if task_id not in strategies:
+        raise HTTPException(status_code=404, detail=f"No strategy set for task {task_id}")
+    
+    return strategies[task_id]
+
+# ----- 3. Experiment Design API -----
+
+@router.get("/designs/{task_id}/initial", response_model=schema.DesignResponse)
+async def get_initial_designs(
+    task_id: str = Path(..., description="Task ID"),
+    samples: int = Query(None, description="Number of samples to generate"),
+):
+    """
+    Get initial design points for a task.
+    """
+    if task_id not in parameter_spaces:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # Check if initial designs already exist
+    task_dir = Path(settings.TASK_DIR) / task_id
+    designs_file = task_dir / "initial_designs.json"
+    
+    if designs_file.exists():
+        with open(designs_file, "r") as f:
+            stored_designs = json.load(f)
+        return schema.DesignResponse(designs=stored_designs)
+    
+    # Placeholder for initial design generation
+    # This will be implemented in Phase 3
+    # For now, return dummy data
+    dummy_designs = [
+        schema.Design(
+            id=f"design_{i+1}",
+            parameters={"x1": 0.1 * i, "x2": "A", "x3": i},
+        )
+        for i in range(samples or settings.DEFAULT_INITIAL_SAMPLES)
+    ]
+    
+    # Save designs
+    with open(designs_file, "w") as f:
+        json.dump([d.dict() for d in dummy_designs], f)
+    
+    return schema.DesignResponse(designs=dummy_designs)
+
+
+@router.post("/results/{task_id}", response_model=dict)
+async def submit_results(
+    results_data: schema.ResultsSubmission,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """
+    Submit experiment results.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # Initialize results list for this task if it doesn't exist
+    if task_id not in results:
+        results[task_id] = []
+    
+    # Add results
+    for result in results_data.results:
+        results[task_id].append(result.dict())
+    
+    # Save to file
+    task_dir = Path(settings.TASK_DIR) / task_id
+    with open(task_dir / "results.json", "w") as f:
+        json.dump(results[task_id], f, default=str)
+    
+    # Update task status
+    tasks[task_id]["status"] = schema.TaskStatus.RUNNING
+    tasks[task_id]["updated_at"] = datetime.now()
+    
+    return {"message": f"{len(results_data.results)} results submitted successfully"}
+
+
+@router.get("/designs/{task_id}/next", response_model=schema.DesignResponse)
+async def get_next_designs(
+    task_id: str = Path(..., description="Task ID"),
+    batch_size: int = Query(1, description="Number of designs to generate"),
+    strategy: Optional[str] = Query(None, description="Batch strategy"),
+):
+    """
+    Get the next batch of recommended design points.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    if task_id not in results or not results[task_id]:
+        raise HTTPException(status_code=400, detail="No results submitted yet")
+    
+    # Placeholder for design recommendation
+    # This will be implemented in Phase 4
+    # For now, return dummy data
+    dummy_next_designs = [
+        schema.Design(
+            id=f"design_{100 + i}",
+            parameters={"x1": 0.5 + 0.1 * i, "x2": "B", "x3": 5 + i},
+            predictions={
+                "y1": schema.Prediction(mean=0.8, std=0.05),
+                "y2": schema.Prediction(mean=0.2, std=0.03),
+            },
+            uncertainty=0.04,
+            reason="Placeholder recommendation",
+        )
+        for i in range(batch_size)
+    ]
+    
+    # Save designs
+    task_dir = Path(settings.TASK_DIR) / task_id
+    next_designs_file = task_dir / "next_designs.json"
+    with open(next_designs_file, "w") as f:
+        json.dump([d.dict() for d in dummy_next_designs], f, default=str)
+    
+    return schema.DesignResponse(designs=dummy_next_designs)
+
+# ----- 4. Model & Analysis API -----
+
+@router.post("/predict/{task_id}", response_model=schema.PredictionResponse)
+async def predict(
+    prediction_request: schema.PredictionRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """
+    Get model predictions for specific parameter combinations.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    if task_id not in results or not results[task_id]:
+        raise HTTPException(status_code=400, detail="No results submitted yet, model not trained")
+    
+    # Placeholder for prediction
+    # This will be implemented in Phase 4
+    predictions = []
+    for params in prediction_request.parameters:
+        predictions.append({
+            "parameters": params,
+            "objectives": {
+                "y1": {"mean": 0.8, "std": 0.05},
+                "y2": {"mean": 0.2, "std": 0.03},
+            }
+        })
+    
+    return schema.PredictionResponse(predictions=predictions)
+
+
+@router.get("/model/{task_id}/performance", response_model=schema.ModelPerformance)
+async def get_model_performance(task_id: str = Path(..., description="Task ID")):
+    """
+    Get the current model's performance metrics.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    if task_id not in results or not results[task_id]:
+        raise HTTPException(status_code=400, detail="No results submitted yet, model not trained")
+    
+    # Placeholder for model performance
+    # This will be implemented in Phase 4
+    return schema.ModelPerformance(
+        metrics=schema.ModelMetrics(
+            r2=0.92,
+            rmse=0.08,
+            mae=0.06,
+        ),
+        cross_validation=schema.CrossValidation(
+            cv_scores=[0.91, 0.93, 0.90, 0.94, 0.92],
+            mean_score=0.92,
+            std_score=0.015,
+        ),
+    )
+
+
+@router.get("/pareto/{task_id}", response_model=schema.ParetoFront)
+async def get_pareto_front(task_id: str = Path(..., description="Task ID")):
+    """
+    Get the Pareto front for multi-objective optimization.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    if task_id not in results or not results[task_id]:
+        raise HTTPException(status_code=400, detail="No results submitted yet")
+    
+    # Placeholder for Pareto front
+    # This will be implemented in Phase 4
+    pareto_solutions = [
+        schema.ParetoSolution(
+            id=f"design_5",
+            parameters={"x1": 0.3, "x2": "B", "x3": 4},
+            objectives={"y1": 0.9, "y2": 0.3},
+            uncertainty=0.02,
+        ),
+        schema.ParetoSolution(
+            id=f"design_8",
+            parameters={"x1": 0.7, "x2": "A", "x3": 6},
+            objectives={"y1": 0.7, "y2": 0.1},
+            uncertainty=0.03,
+        ),
+    ]
+    
+    dominated_solutions = [
+        schema.ParetoSolution(
+            id=f"design_2",
+            parameters={"x1": 0.2, "x2": "C", "x3": 3},
+            objectives={"y1": 0.6, "y2": 0.4},
+            uncertainty=0.04,
+        ),
+    ]
+    
+    return schema.ParetoFront(
+        pareto_front=pareto_solutions,
+        dominated_solutions=dominated_solutions,
+        ideal_point={"y1": 1.0, "y2": 0.0},
+        nadir_point={"y1": 0.5, "y2": 0.8},
+    )
+
+
+@router.get("/uncertainty/{task_id}", response_model=schema.UncertaintyAnalysis)
+async def get_uncertainty_analysis(task_id: str = Path(..., description="Task ID")):
+    """
+    Get uncertainty analysis comparing predictions to actual values.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    if task_id not in results or not results[task_id]:
+        raise HTTPException(status_code=400, detail="No results submitted yet")
+    
+    # Placeholder for uncertainty analysis
+    # This will be implemented in Phase 4
+    prediction_vs_actual = [
+        schema.PredictionActual(
+            design_id="design_1",
+            predicted=schema.Prediction(mean=0.8, std=0.05),
+            actual=0.75,
+            error=0.05,
+            within_confidence=True,
+        ),
+        schema.PredictionActual(
+            design_id="design_2",
+            predicted=schema.Prediction(mean=0.7, std=0.04),
+            actual=0.72,
+            error=0.02,
+            within_confidence=True,
+        ),
+    ]
+    
+    return schema.UncertaintyAnalysis(
+        prediction_vs_actual=prediction_vs_actual,
+        calibration_metrics=schema.CalibrationMetrics(
+            coverage_probability=0.95,
+            sharpness=0.08,
+        ),
+    )
+
+# ----- 5. Task Management API -----
+
+@router.get("/tasks", response_model=schema.TaskList)
+async def get_tasks():
+    """
+    Get a list of all optimization tasks.
+    """
+    task_list = [
+        schema.TaskInfo(**task) for task in tasks.values()
+    ]
+    return schema.TaskList(tasks=task_list)
+
+
+@router.get("/tasks/{task_id}/status", response_model=schema.TaskStatusResponse)
+async def get_task_status(task_id: str = Path(..., description="Task ID")):
+    """
+    Get the status of a specific task.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # Get best result (if any)
+    best_result = None
+    if task_id in results and results[task_id]:
+        # Placeholder for finding best result
+        # This will be implemented in Phase 5
+        best_result = {
+            "parameters": {"x1": 0.4, "x2": "C", "x3": 7},
+            "objectives": {"y1": 0.92, "y2": 0.18},
+        }
+    
+    return schema.TaskStatusResponse(
+        status=schema.TaskStatus(tasks[task_id]["status"]),
+        current_iteration=len(results.get(task_id, [])),
+        total_iterations=strategies.get(task_id, {}).get("iterations", None),
+        best_result=best_result,
+        last_updated=tasks[task_id]["updated_at"],
+    )
+
+
+@router.get("/tasks/{task_id}/export")
+async def export_task_data(
+    task_id: str = Path(..., description="Task ID"),
+    format: str = Query("json", description="Export format (json or csv)"),
+):
+    """
+    Export complete task data.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    task_dir = Path(settings.TASK_DIR) / task_id
+    export_file = task_dir / f"export.{format}"
+    
+    # Placeholder for data export
+    # This will be implemented in Phase 5
+    if format == "json":
+        export_data = {
+            "task_info": tasks[task_id],
+            "parameter_space": parameter_spaces.get(task_id, {}).dict() if task_id in parameter_spaces else {},
+            "strategy": strategies.get(task_id, {}).dict() if task_id in strategies else {},
+            "results": results.get(task_id, []),
+        }
+        
+        with open(export_file, "w") as f:
+            json.dump(export_data, f, default=str)
+    else:
+        # CSV export would be implemented here
+        # For now, just create a dummy file
+        with open(export_file, "w") as f:
+            f.write("task_id,parameter,value\n")
+            f.write(f"{task_id},dummy,data\n")
+    
+    return FileResponse(
+        path=export_file,
+        filename=f"task_{task_id}_export.{format}",
+        media_type="application/json" if format == "json" else "text/csv",
+    )
+
+# ----- 6. WebSocket API -----
+
+@router.websocket("/ws/tasks/{task_id}")
+async def websocket_endpoint(websocket: WebSocket, task_id: str):
+    """
+    WebSocket connection for real-time task updates.
+    """
+    if task_id not in tasks:
+        await websocket.close(code=1008, reason=f"Task {task_id} not found")
+        return
+    
+    await websocket.accept()
+    
+    try:
+        # Send initial status
+        await websocket.send_json({
+            "type": "status",
+            "data": {
+                "task_id": task_id,
+                "status": tasks[task_id]["status"],
+                "timestamp": datetime.now().isoformat(),
+            }
+        })
+        
+        # Keep connection alive with periodic pings
+        while True:
+            # In a real implementation, this would be event-driven
+            # For now, just sleep and send a dummy update
+            await asyncio.sleep(settings.WS_PING_INTERVAL)
+            
+            # Send ping to keep connection alive
+            await websocket.send_json({
+                "type": "ping",
+                "data": {
+                    "timestamp": datetime.now().isoformat(),
+                }
+            })
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for task {task_id}")
+    finally:
+        logger.info(f"WebSocket connection closed for task {task_id}")
+
+# ----- 7. Additional Endpoints (from supplementary suggestions) -----
+
+@router.post("/tasks/{task_id}/restart", response_model=dict)
+async def restart_task(
+    restart_config: schema.TaskRestart,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """
+    Restart a BO experiment task after interruption.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # Update task status
+    tasks[task_id]["status"] = schema.TaskStatus.RUNNING
+    tasks[task_id]["updated_at"] = datetime.now()
+    
+    # Handle history based on restart strategy
+    if restart_config.strategy == "reset" and not restart_config.preserve_history:
+        # Clear results
+        if task_id in results:
+            results[task_id] = []
+        
+        # Save empty results
+        task_dir = Path(settings.TASK_DIR) / task_id
+        with open(task_dir / "results.json", "w") as f:
+            json.dump([], f)
+    
+    return {
+        "message": f"Task {task_id} restarted with strategy: {restart_config.strategy}",
+        "preserve_history": restart_config.preserve_history,
+    }
+
+
+@router.get("/diagnostics/{task_id}", response_model=schema.Diagnostics)
+async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
+    """
+    Get diagnostics information for debugging.
+    """
+    if task_id not in tasks:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+    
+    # This would contain actual diagnostics in a real implementation
+    # For now, return dummy data
+    return schema.Diagnostics(
+        parameter_space="valid" if task_id in parameter_spaces else "not_defined",
+        model_trained=task_id in results and len(results[task_id]) > 0,
+        recent_exception=None,
+        pending_experiments=[],
+        last_recommendation_time=datetime.now() if task_id in results and results[task_id] else None,
+    ) 

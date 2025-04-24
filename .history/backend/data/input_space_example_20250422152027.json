@@ -1,0 +1,50 @@
+{
+  "name": "Catalyst Optimization Example",
+  "parameters": [
+    {
+      "name": "temperature",
+      "type": "continuous",
+      "min": 50.0,
+      "max": 100.0
+    },
+    {
+      "name": "pressure",
+      "type": "continuous",
+      "min": 1.0,
+      "max": 10.0
+    },
+    {
+      "name": "catalyst_type",
+      "type": "categorical",
+      "values": ["A", "B", "C", "D"]
+    },
+    {
+      "name": "reaction_time",
+      "type": "discrete",
+      "min": 1,
+      "max": 24,
+      "step": 1
+    }
+  ],
+  "objectives": [
+    {
+      "name": "yield",
+      "type": "maximize"
+    },
+    {
+      "name": "purity",
+      "type": "maximize"
+    },
+    {
+      "name": "cost",
+      "type": "minimize"
+    }
+  ],
+  "constraints": [
+    {
+      "expression": "temperature / 100 + pressure / 10",
+      "type": "sum_less_than",
+      "value": 1.5
+    }
+  ]
+} 

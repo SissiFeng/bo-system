@@ -1,0 +1,1 @@
+{"algorithm": "gp", "settings": {"exploration_weight": 0.01}, "acquisition_function": "ei", "batch_size": 1, "task_id": "bb770cac-f148-43c5-9e8f-d77dc723bb36", "created_at": "2025-04-23 09:37:32.265615", "updated_at": "2025-04-23 09:37:32.265615"}

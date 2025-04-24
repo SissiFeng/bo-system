@@ -1,0 +1,4 @@
+{"timestamp": "2025-04-22T16:46:06.187581", "level": "INFO", "message": "Logger initialized: api", "module": "logger", "function": "setup_logger", "line": 89}
+{"timestamp": "2025-04-22T16:53:32.994111", "level": "INFO", "message": "Logger initialized: api", "module": "logger", "function": "setup_logger", "line": 89}
+{"timestamp": "2025-04-22T16:54:07.098061", "level": "INFO", "message": "Logger initialized: api", "module": "logger", "function": "setup_logger", "line": 89}
+{"timestamp": "2025-04-22T16:54:58.930444", "level": "INFO", "message": "Logger initialized: api", "module": "logger", "function": "setup_logger", "line": 89}
