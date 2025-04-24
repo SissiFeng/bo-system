@@ -127,13 +127,6 @@ This document outlines the development plan and steps for building a modular, co
    - Configuration options
    - Usage examples
 
-## Timeline and Priorities
-
-- **Phase 1 & 2**: Week 1-2
-- **Phase 3**: Week 3
-- **Phase 4**: Week 4-6
-- **Phase 5**: Week 7
-- **Phase 6 & 7**: Week 8-10
 
 ## Technology Stack
 
@@ -142,11 +135,3 @@ This document outlines the development plan and steps for building a modular, co
 - **BO Implementation**: GPyTorch, BoTorch
 - **Storage**: JSON files, SQLite (optional: PostgreSQL)
 - **Deployment**: Docker, Docker Compose
-
-## Success Criteria
-
-- All API endpoints are implemented and documented
-- Core BO functionality is working with at least 3 different surrogate models
-- System can handle at least 50 parameters and 5 objectives
-- Real-time updates are delivered with < 1s latency
-- All tests pass with > 90% code coverage
