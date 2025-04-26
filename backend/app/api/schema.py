@@ -1,10 +1,8 @@
 from typing import Dict, List, Optional, Any, Union, Literal
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, model_validator
-from pydantic import RootModel
 from datetime import datetime
 import re
-from bson import ObjectId as BsonObjectId
 
 # Common Base Models
 
@@ -29,22 +27,20 @@ class ParameterType(str, Enum):
     """Enum for parameter types."""
     CONTINUOUS = "continuous"
     CATEGORICAL = "categorical"
-    DISCRETE = "discrete"
+    INTEGER = "integer"  # integer parameter type
 
 
-class ObjectiveType(str, Enum):
-    """Enum for objective types."""
+class ObjectiveDirection(str, Enum):
+    """Enum for optimization direction."""
     MAXIMIZE = "maximize"
     MINIMIZE = "minimize"
 
 
-class ConstraintType(str, Enum):
-    """Enum for constraint types."""
-    SUM_EQUALS = "sum_equals"
-    SUM_LESS_THAN = "sum_less_than"
-    SUM_GREATER_THAN = "sum_greater_than"
-    PRODUCT_EQUALS = "product_equals"
-    CUSTOM = "custom"
+class ConstraintRelation(str, Enum):
+    """Enum for constraint relations."""
+    LESS_THAN_OR_EQUAL = "<="
+    GREATER_THAN_OR_EQUAL = ">="
+    EQUAL = "=="
 
 
 class SamplingMethod(str, Enum):
@@ -89,21 +85,22 @@ class ModelType(str, Enum):
 
 class TaskStatus(str, Enum):
     """Enum for optimization task status."""
-    CREATED = "created"
-    RUNNING = "running"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    FAILED = "failed"
+    PENDING = "pending"  # initial state, waiting for configuration
+    CONFIGURED = "configured"  # parameter space is configured
+    GENERATING_INITIAL = "generating_initial"  # generating initial experimental points
+    READY_FOR_RESULTS = "ready_for_results"  # waiting for experimental results
+    OPTIMIZING = "optimizing"  # executing optimization loop
+    PAUSED = "paused"  # paused
+    COMPLETED = "completed"  # completed
+    FAILED = "failed"  # failed
 
 
 class TaskStatusResponse(BaseModel):
     """Model for task status response."""
-    id: str = Field(..., description="Task ID")
-    name: str = Field(..., description="Task name")
-    status: str = Field(..., description="Current status of the task")
-    created_at: datetime = Field(..., description="Task creation time")
-    updated_at: datetime = Field(..., description="Last update time")
-    progress: float = Field(..., ge=0, le=100, description="Progress percentage")
+    status: TaskStatus = Field(..., description="Task status")
+    current_iteration: Optional[int] = Field(None, description="Current iteration")
+    total_evaluations: Optional[int] = Field(None, description="Total evaluations")
+    message: Optional[str] = Field(None, description="Status message")
     
     @field_validator('status')
     @classmethod
@@ -117,343 +114,267 @@ class TaskStatusResponse(BaseModel):
 
 # Parameter Space Models
 
-class ParameterBase(BaseModel):
-    """Base model for all parameter types."""
-    name: str = Field(..., description="Name of the parameter")
+class ParameterConfig(BaseModel):
+    """Configuration model for a single parameter."""
+    name: str = Field(..., description="Unique name of the parameter")
     type: ParameterType = Field(..., description="Type of the parameter")
+    bounds: Optional[List[Union[float, int]]] = Field(None, description="Bounds [min, max] for continuous or integer parameters")
+    categories: Optional[List[Any]] = Field(None, description="List of possible values for categorical parameters")
+    log_scale: Optional[bool] = Field(False, description="Whether the parameter should be treated on a log scale")
+    precision: Optional[int] = Field(None, description="Number of decimal places for continuous parameters")
 
-
-class ContinuousParameter(ParameterBase):
-    """Model for continuous parameters."""
-    type: Literal[ParameterType.CONTINUOUS] = ParameterType.CONTINUOUS
-    min: float = Field(..., description="Minimum value")
-    max: float = Field(..., description="Maximum value")
-    
-    @field_validator('max')
-    @classmethod
-    def validate_min_max(cls, v, info):
-        """Validate that max is greater than min."""
-        data = info.data
-        if 'min' in data and v <= data['min']:
-            raise ValueError("max must be greater than min")
-        return v
-
-
-class DiscreteParameter(ParameterBase):
-    """Model for discrete parameters."""
-    type: Literal[ParameterType.DISCRETE] = ParameterType.DISCRETE
-    min: int = Field(..., description="Minimum value")
-    max: int = Field(..., description="Maximum value")
-    step: int = Field(1, description="Step size")
-    
-    @field_validator('max')
-    @classmethod
-    def validate_min_max(cls, v, info):
-        """Validate that max is greater than min."""
-        data = info.data
-        if 'min' in data and v <= data['min']:
-            raise ValueError("max must be greater than min")
-        return v
-    
-    @field_validator('step')
-    @classmethod
-    def validate_step(cls, v):
-        """Validate that step is positive."""
-        if v <= 0:
-            raise ValueError("step must be positive")
-        return v
-
-
-class CategoricalParameter(ParameterBase):
-    """Model for categorical parameters."""
-    type: Literal[ParameterType.CATEGORICAL] = ParameterType.CATEGORICAL
-    values: List[Any] = Field(..., description="Possible values")
-    
-    @field_validator('values')
-    @classmethod
-    def validate_values(cls, v):
-        """Validate that values is not empty."""
-        if len(v) == 0:
-            raise ValueError("values must not be empty")
-        return v
-
-
-class ObjectiveBase(BaseModel):
-    """Base model for objectives."""
-    name: str = Field(..., description="Name of the objective")
-    type: ObjectiveType = Field(..., description="Type of the objective")
-    bounds: Optional[List[float]] = Field(None, description="Bounds for the objective")
-    
-    @field_validator('bounds')
-    @classmethod
-    def validate_bounds(cls, v):
-        """Validate that bounds is a list of two floats."""
-        if v is not None:
-            if len(v) != 2:
-                raise ValueError("bounds must be a list of two values")
-            if v[0] >= v[1]:
-                raise ValueError("lower bound must be less than upper bound")
-        return v
-
-
-class ConstraintBase(BaseModel):
-    """Base model for constraints."""
-    name: str = Field(..., description="Name of the constraint")
-    type: ConstraintType = Field(..., description="Type of the constraint")
-    threshold: float = Field(..., description="Threshold value for the constraint")
-
-
-class ParameterSpaceCreate(BaseModel):
-    """Model for creating a parameter space."""
-    name: str = Field(..., description="Name of the optimization task")
-    parameters: Dict[str, Union[ContinuousParameter, DiscreteParameter, CategoricalParameter]] = Field(
-        ..., description="Dictionary of parameters"
-    )
-    objectives: Dict[str, ObjectiveBase] = Field(..., description="Dictionary of objectives")
-    constraints: Dict[str, ConstraintBase] = Field({}, description="Dictionary of constraints")
-    
     @model_validator(mode='after')
-    def validate_parameter_space(self):
-        """Validate that the parameter space has at least one parameter and one objective."""
-        if len(self.parameters) == 0:
-            raise ValueError("parameter space must have at least one parameter")
-        if len(self.objectives) == 0:
-            raise ValueError("parameter space must have at least one objective")
+    def check_parameter_consistency(self):
+        """validate the consistency of parameter configuration"""
+        if self.type == ParameterType.CONTINUOUS or self.type == ParameterType.INTEGER:
+            if self.bounds is None:
+                raise ValueError(f"parameter '{self.name}' type is '{self.type}', must specify 'bounds'")
+            if len(self.bounds) != 2:
+                raise ValueError(f"parameter '{self.name}' 'bounds' must contain exactly two elements [min, max]")
+            if self.bounds[0] >= self.bounds[1]:
+                raise ValueError(f"parameter '{self.name}' 'bounds' must have min < max")
+            if self.type == ParameterType.INTEGER:
+                if not all(isinstance(b, int) for b in self.bounds):
+                    raise ValueError(f"parameter '{self.name}' type is '{self.type}', must be integer")
+            if self.type == ParameterType.CONTINUOUS:
+                if not all(isinstance(b, (int, float)) for b in self.bounds):
+                    raise ValueError(f"parameter '{self.name}' type is '{self.type}', must be numeric")
+
+            if self.categories is not None:
+                raise ValueError(f"parameter '{self.name}' type is '{self.type}', should not define 'categories'")
+
+        elif self.type == ParameterType.CATEGORICAL:
+            if self.categories is None:
+                raise ValueError(f"parameter '{self.name}' type is '{self.type}', must specify 'categories'")
+            if not self.categories:
+                raise ValueError(f"parameter '{self.name}' 'categories' list cannot be empty")
+            if self.bounds is not None:
+                raise ValueError(f"parameter '{self.name}' type is '{self.type}', should not define 'bounds'")
+            if self.log_scale:
+                raise ValueError(f"parameter '{self.name}' type is '{self.type}', categorical parameters cannot use log scale")
+            if self.precision is not None:
+                raise ValueError(f"parameter '{self.name}' type is '{self.type}', categorical parameters do not use precision setting")
+
         return self
 
 
-class ParameterSpaceCreationResponse(BaseModel):
-    """Response model after creating a parameter space."""
+class ObjectiveConfig(BaseModel):
+    """Configuration model for a single objective."""
+    name: str = Field(..., description="Unique name of the objective")
+    direction: ObjectiveDirection = Field(..., description="Optimization direction (minimize or maximize)")
+    target: Optional[float] = Field(None, description="Optional target value for the objective")
+
+
+class ConstraintConfig(BaseModel):
+    """Configuration model for a single constraint."""
+    name: Optional[str] = Field(None, description="Optional unique name for the constraint")
+    parameters: List[str] = Field(..., description="List of parameter names involved in the constraint")
+    relation: ConstraintRelation = Field(..., description="Constraint relation (e.g., <=, >=, ==)")
+    threshold: float = Field(..., description="Threshold value for the constraint")
+
+    @model_validator(mode='after')
+    def check_constraint_definition(self):
+        """validate the constraint definition"""
+        if not self.parameters:
+            raise ValueError("constraint must involve at least one parameter")
+        return self
+
+
+class ParameterSpaceConfig(BaseModel):
+    """declarative configuration model for the entire parameter space, as input for the API"""
+    name: str = Field(..., description="name of the optimization task")
+    parameters: List[ParameterConfig] = Field(..., description="list of parameter configurations")
+    objectives: List[ObjectiveConfig] = Field(..., description="list of objective configurations")
+    constraints: Optional[List[ConstraintConfig]] = Field(None, description="optional list of constraint configurations")
+    description: Optional[str] = Field(None, description="参数空间的可选描述")
+
+    @model_validator(mode='after')
+    def check_names_uniqueness_and_references(self):
+        """validate the uniqueness of names and the validity of references"""
+        param_names = [p.name for p in self.parameters]
+        obj_names = [o.name for o in self.objectives]
+
+        # check for duplicate parameter names
+        if len(param_names) != len(set(param_names)):
+            raise ValueError("duplicate parameter names found")
+
+        # check for duplicate objective names
+        if len(obj_names) != len(set(obj_names)):
+            raise ValueError("duplicate objective names found")
+
+        # check for duplicate constraint names
+        if self.constraints:
+            constraint_names = [c.name for c in self.constraints if c.name]
+            if len(constraint_names) != len(set(constraint_names)):
+                raise ValueError("duplicate constraint names found")
+
+            all_param_names = set(param_names)
+            for i, constraint in enumerate(self.constraints):
+                for param_name in constraint.parameters:
+                    if param_name not in all_param_names:
+                        constraint_id = constraint.name if constraint.name else f"index {i}"
+                        raise ValueError(f"constraint '{constraint_id}' references undefined parameter '{param_name}'")
+        return self
+
+
+class ParameterSpaceCreateResponse(BaseModel):
+    """response model after creating the parameter space"""
     task_id: str = Field(..., description="ID of the created optimization task")
-    status: str = Field(..., description="Status of the task")
-    message: str = Field(..., description="Message about the operation")
-    
-    @field_validator('status')
-    @classmethod 
-    def validate_status(cls, v):
-        """Validate task status is one of the allowed values."""
-        allowed = [status.value for status in TaskStatus]
-        if v not in allowed:
-            raise ValueError(f"Status must be one of: {', '.join(allowed)}")
-        return v
+    message: str = Field("Parameter space configured successfully", description="operation message")
 
 
-class ParameterSpaceRead(ParameterSpaceCreate):
-    """Model for reading a parameter space."""
-    task_id: str = Field(..., description="ID of the optimization task")
-    created_at: datetime = Field(..., description="Creation timestamp")
-    updated_at: datetime = Field(..., description="Last update timestamp")
+class ParameterSpaceReadResponse(ParameterSpaceConfig):
+    """model for reading the parameter space configuration"""
+    task_id: str = Field(..., description="ID of the optimization task that this configuration belongs to")
+    created_at: Optional[datetime] = Field(None, description="task creation time")
+    updated_at: Optional[datetime] = Field(None, description="configuration last update time")
 
 
 # Strategy Models
 
-class InitialSampling(BaseModel):
-    """Model for initial sampling configuration."""
-    method: SamplingMethod = Field(..., description="Sampling method")
-    samples: int = Field(..., description="Number of initial samples")
-
-
-class StrategyConfig(BaseModel):
-    """Model for advanced strategy configuration."""
-    acquisition_function: AcquisitionFunction = Field(..., description="Acquisition function")
-    kernel: Optional[KernelType] = Field(None, description="Kernel for GP models")
-    exploration_weight: Optional[float] = Field(None, description="Exploration weight parameter")
-    noise_level: Optional[float] = Field(None, description="Assumed noise level")
-    multi_objective: Optional[bool] = Field(False, description="Enable multi-objective optimization")
-    moo_acquisition: Optional[str] = Field(None, description="Multi-objective acquisition function")
-    noisy_moo: Optional[bool] = Field(False, description="Handle noisy evaluations in MOO")
-
-
 class StrategyCreate(BaseModel):
-    """Model for creating an optimization strategy."""
-    algorithm: str = Field(..., description="Algorithm to use for optimization")
-    settings: Dict[str, Any] = Field({}, description="Additional settings for the algorithm")
-    acquisition_function: str = Field("EI", description="Acquisition function to use")
-    batch_size: int = Field(1, description="Number of points to suggest at once")
-    
-    @field_validator('batch_size')
-    @classmethod
-    def validate_batch_size(cls, v):
-        """Validate that batch_size is positive."""
-        if v <= 0:
-            raise ValueError("batch_size must be positive")
-        return v
+    """model for creating the optimization strategy"""
+    model_type: str = Field("gp", description="proxy model type (e.g., 'gp', 'rf')")
+    acquisition_type: str = Field("ei", description="acquisition function type (e.g., 'ei', 'ucb')")
+    batch_size: Optional[int] = Field(1, description="number of points to suggest per batch", ge=1)
+    n_initial_points: Optional[int] = Field(10, description="number of initial design points to generate", ge=1)
+    initial_design_type: Optional[str] = Field("lhs", description="initial design type (e.g., 'lhs', 'random', 'sobol')")
+    settings: Optional[Dict[str, Any]] = Field({}, description="other strategy settings")
 
 
-class StrategyRead(StrategyCreate):
-    """Model for reading an optimization strategy."""
-    task_id: str = Field(..., description="ID of the task this strategy belongs to")
-    created_at: datetime = Field(..., description="Creation timestamp")
-    updated_at: datetime = Field(..., description="Last update timestamp")
+class StrategyReadResponse(StrategyCreate):
+    """model for reading the optimization strategy"""
+    task_id: str = Field(..., description="ID of the optimization task that this strategy belongs to")
+    created_at: Optional[datetime] = Field(None, description="strategy creation time")
+    updated_at: Optional[datetime] = Field(None, description="strategy last update time")
 
 
 # Design Models
 
-class DesignParameters(RootModel):
-    """Model for design parameters."""
-    root: Dict[str, Any] = Field(..., description="Parameter values for this design")
+class DesignParameters(BaseModel):
+    """model for design parameters"""
+    parameters: Dict[str, Any] = Field(..., description="design parameters")
 
 
 class DesignMetadata(BaseModel):
-    """Model for experiment metadata."""
-    timestamp: Optional[datetime] = Field(None, description="Timestamp of the experiment")
-    experimenter: Optional[str] = Field(None, description="Name of the experimenter")
-    notes: Optional[str] = Field(None, description="Notes about the experiment")
+    """model for experimental metadata"""
+    timestamp: Optional[datetime] = Field(None, description="experiment timestamp")
+    experimenter: Optional[str] = Field(None, description="experimenter name")
+    notes: Optional[str] = Field(None, description="notes about the experiment")
 
 
 class Prediction(BaseModel):
-    """Model for prediction output with uncertainty."""
-    mean: float = Field(..., description="Mean prediction")
-    std: float = Field(..., description="Standard deviation of prediction")
+    """model for prediction with uncertainty"""
+    mean: float = Field(..., description="average prediction value")
+    std: float = Field(..., description="prediction standard deviation")
 
 
-class Predictions(RootModel):
-    """Model for objective predictions."""
-    root: Dict[str, Prediction] = Field(..., description="Predictions for each objective")
+class PredictionResponse(BaseModel):
+    """model for prediction response"""
+    predictions: Dict[str, Prediction] = Field(..., description="predictions for each objective")
 
 
 class Design(BaseModel):
-    """Model for an experiment design point."""
-    id: str = Field(..., description="Unique identifier for this design")
-    parameters: Dict[str, Any] = Field(..., description="Parameter values for this design")
-    predictions: Optional[Dict[str, Prediction]] = Field(None, description="Predicted outcomes")
-    uncertainty: Optional[float] = Field(None, description="Overall uncertainty measure")
-    reason: Optional[str] = Field(None, description="Reason this design was recommended")
+    """model for experimental design point"""
+    id: str = Field(..., description="unique identifier of the design")
+    parameters: Dict[str, Any] = Field(..., description="design parameters")
+    predictions: Optional[Dict[str, Prediction]] = Field(None, description="predictions")
+    uncertainty: Optional[float] = Field(None, description="overall uncertainty measure")
+    reason: Optional[str] = Field(None, description="reason for recommending this design")
 
 
 class DesignResponse(BaseModel):
-    """Response model for design endpoints."""
-    designs: List[Design] = Field(..., description="List of design points")
+    """model for design response"""
+    designs: List[Design] = Field(..., description="list of design points")
 
 
 # Result Models
 
-class ObjectiveResults(RootModel):
-    """Model for objective function results."""
-    root: Dict[str, float] = Field(..., description="Values for each objective")
-
-
 class ResultSubmit(BaseModel):
-    """Model for submitting results."""
-    parameters: Dict[str, Any] = Field(..., description="Parameter values")
-    objectives: Dict[str, float] = Field(..., description="Objective values")
-    constraints: Dict[str, float] = Field({}, description="Constraint values")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Additional metadata")
+    """model for submitting results"""
+    parameters: Dict[str, Any] = Field(..., description="parameter values")
+    objectives: Dict[str, float] = Field(..., description="objective values")
+    constraints: Optional[Dict[str, float]] = Field({}, description="constraint values")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="additional metadata")
     
     @model_validator(mode='after')
     def validate_result(self):
-        """Validate that the result has all required parameters and objectives."""
-        # Additional validation can be implemented here
+        """validate the result contains all required parameters and objectives"""
+        # 这里可以实现额外的验证
         return self
 
 
 class ResultsSubmission(BaseModel):
-    """Model for batch submission of results."""
-    results: List[ResultSubmit] = Field(..., description="List of experiment results")
+    """model for batch submitting results"""
+    results: List[ResultSubmit] = Field(..., description="list of experimental results")
 
 
 # Prediction Models
 
 class PredictionRequest(BaseModel):
-    """Model for prediction requests."""
-    parameters: Dict[str, Any] = Field(..., description="Parameter values to predict for")
+    """model for prediction request"""
+    parameters: Dict[str, Any] = Field(..., description="parameter values to predict")
     
     @model_validator(mode='after')
     def validate_parameters(self):
-        """Validate that all required parameters are present."""
-        # This is a placeholder for additional validation
+        """validate the parameters exist"""
+        # 这是额外验证的占位符
         return self
 
 
-class PredictionResponse(BaseModel):
-    """Response model for prediction requests."""
-    predictions: List[Dict] = Field(..., description="Predictions for each parameter combination")
-
-
-# Model Performance Models
-
-class ModelMetrics(BaseModel):
-    """Model for regression performance metrics."""
-    r2: float = Field(..., description="R-squared score")
-    rmse: float = Field(..., description="Root mean squared error")
-    mae: float = Field(..., description="Mean absolute error")
-
-
-class CrossValidation(BaseModel):
-    """Model for cross-validation results."""
-    cv_scores: List[float] = Field(..., description="Cross-validation scores")
-    mean_score: float = Field(..., description="Mean of cross-validation scores")
-    std_score: float = Field(..., description="Standard deviation of cross-validation scores")
-
-
 class ModelPerformance(BaseModel):
-    """Model for the current model performance."""
-    model_type: str = Field(..., description="Type of surrogate model used")
-    metrics: Dict[str, float] = Field(..., description="Performance metrics (e.g., R², MAE, RMSE)")
-    cross_validation_results: Optional[Dict[str, List[float]]] = Field(None, description="Cross-validation results")
+    """model for current model performance"""
+    model_type: str = Field(..., description="used proxy model type")
+    metrics: Dict[str, float] = Field(..., description="performance metrics (e.g., R², MAE, RMSE)")
+    cross_validation_results: Optional[Dict[str, List[float]]] = Field(None, description="cross-validation results")
     
     @field_validator('metrics')
     @classmethod
     def validate_metrics(cls, v):
-        """Validate that metrics contains required fields."""
+        """validate the metrics contain required fields"""
         required_metrics = ["r2", "mae", "rmse"]
         for metric in required_metrics:
             if metric not in v:
-                raise ValueError(f"Required metric '{metric}' missing")
+                raise ValueError(f"missing required metric '{metric}'")
         return v
 
 
 # Pareto Front Models
 
 class ParetoSolution(BaseModel):
-    """Model for a solution on the Pareto front."""
-    id: str = Field(..., description="Design ID")
-    parameters: Dict[str, Any] = Field(..., description="Parameter values")
-    objectives: Dict[str, float] = Field(..., description="Objective values")
-    uncertainty: Optional[float] = Field(None, description="Uncertainty measure")
+    """model for Pareto front solution"""
+    id: str = Field(..., description="design ID")
+    parameters: Dict[str, Any] = Field(..., description="parameter values")
+    objectives: Dict[str, float] = Field(..., description="objective values")
+    uncertainty: Optional[float] = Field(None, description="uncertainty measure")
 
 
 class ParetoFront(BaseModel):
-    """Model for the current Pareto front."""
-    points: List[Dict[str, Any]] = Field(..., description="List of non-dominated points")
-    objective_names: List[str] = Field(..., description="Names of objectives used for Pareto front")
+    """model for Pareto front"""
+    points: List[Dict[str, Any]] = Field(..., description="list of non-dominated points")
+    objective_names: List[str] = Field(..., description="names of objectives used for Pareto front")
     
     @model_validator(mode='after')
     def validate_points(self):
-        """Validate that points contain values for all objectives."""
+        """validate the points contain all objective values"""
         for point in self.points:
             for obj in self.objective_names:
                 if obj not in point:
-                    raise ValueError(f"Point missing value for objective '{obj}'")
+                    raise ValueError(f"point missing objective value '{obj}'")
         return self
 
 
 # Uncertainty Analysis Models
 
-class PredictionActual(BaseModel):
-    """Model for prediction vs actual comparison."""
-    design_id: str = Field(..., description="Design ID")
-    predicted: Prediction = Field(..., description="Predicted value with uncertainty")
-    actual: float = Field(..., description="Actual measured value")
-    error: float = Field(..., description="Absolute error")
-    within_confidence: bool = Field(..., description="Whether actual is within confidence interval")
-
-
-class CalibrationMetrics(BaseModel):
-    """Model for uncertainty calibration metrics."""
-    coverage_probability: float = Field(..., description="Empirical coverage probability")
-    sharpness: float = Field(..., description="Sharpness of predictions")
-
-
 class UncertaintyAnalysis(BaseModel):
-    """Model for uncertainty analysis results."""
-    parameter_name: str = Field(..., description="Name of the parameter analyzed")
-    uncertainty_values: List[float] = Field(..., description="Uncertainty values across the parameter range")
-    parameter_values: List[float] = Field(..., description="Parameter values at which uncertainty was evaluated")
+    """model for uncertainty analysis results"""
+    parameter_name: str = Field(..., description="name of the analyzed parameter")
+    uncertainty_values: List[float] = Field(..., description="uncertainty values in the parameter range")
+    parameter_values: List[float] = Field(..., description="parameter values used for uncertainty evaluation")
     
     @model_validator(mode='after')
     def validate_data_length(self):
-        """Validate that uncertainty and parameter values have same length."""
+        """validate the uncertainty and parameter values have the same length"""
         if len(self.uncertainty_values) != len(self.parameter_values):
             raise ValueError("uncertainty_values and parameter_values must have the same length")
         return self
@@ -461,95 +382,64 @@ class UncertaintyAnalysis(BaseModel):
 
 # Task Management Models
 
-class TaskInfo(BaseModel):
-    """Basic task information model."""
-    task_id: str = Field(..., description="Task ID")
-    name: str = Field(..., description="Task name")
-    status: TaskStatusResponse = Field(..., description="Task status")
-    created_at: datetime = Field(..., description="Creation timestamp")
-    updated_at: datetime = Field(..., description="Last update timestamp")
-
-
-class TaskList(BaseModel):
-    """Model for task listing response."""
-    tasks: List[TaskInfo] = Field(..., description="List of tasks")
+class TaskBasicInfo(BaseModel):
+    """model for basic task information"""
+    task_id: str = Field(..., description="task ID")
+    name: str = Field(..., description="task name")
+    status: TaskStatus = Field(..., description="task status")
+    created_at: datetime = Field(..., description="creation timestamp")
+    updated_at: datetime = Field(..., description="last update timestamp")
+    progress: float = Field(0.0, ge=0, le=100, description="progress percentage")
 
 
 class TaskListResponse(BaseModel):
-    """Model for task list response."""
-    tasks: List[Dict] = Field(..., description="List of all optimization tasks")
-    count: int = Field(..., description="Total number of tasks")
-
-
-class TaskSummary(BaseModel):
-    """Model for task summary."""
-    task_id: str = Field(..., description="Task ID")
-    name: str = Field(..., description="Task name")
-    status: str = Field(..., description="Task status")
-    created_at: datetime = Field(..., description="Creation timestamp")
-    updated_at: datetime = Field(..., description="Last update timestamp")
-    
-    @field_validator('status')
-    @classmethod
-    def validate_status(cls, v):
-        """Validate task status is one of the allowed values."""
-        allowed = [status.value for status in TaskStatus]
-        if v not in allowed:
-            raise ValueError(f"Status must be one of: {', '.join(allowed)}")
-        return v
+    """model for task list response"""
+    tasks: List[TaskBasicInfo] = Field(..., description="list of all optimization tasks")
+    count: int = Field(..., description="total number of tasks")
 
 
 class TaskDetails(BaseModel):
-    """Detailed task information response model."""
-    task_id: str = Field(..., description="Task ID")
-    name: str = Field(..., description="Task name") 
-    status: str = Field(..., description="Current status of the task")
-    created_at: datetime = Field(..., description="Task creation time")
-    updated_at: datetime = Field(..., description="Last update time")
-    progress: float = Field(..., ge=0, le=100, description="Progress percentage")
-    parameter_space: Optional[ParameterSpaceRead] = Field(None, description="Parameter space definition")
-    strategy: Optional[Dict] = Field(None, description="Optimization strategy")
-    initial_designs: Optional[List[Dict]] = Field(None, description="Initial design points")
-    results: Optional[List[Dict]] = Field(None, description="Submitted results")
-    next_points: Optional[List[Dict]] = Field(None, description="Next recommended points")
-    
-    @field_validator('status')
-    @classmethod
-    def validate_status(cls, v):
-        """Validate task status is one of the allowed values."""
-        allowed = [status.value for status in TaskStatus]
-        if v not in allowed:
-            raise ValueError(f"Status must be one of: {', '.join(allowed)}")
-        return v
+    """model for detailed task information response"""
+    task_id: str = Field(..., description="task ID")
+    name: str = Field(..., description="task name") 
+    status: TaskStatus = Field(..., description="current task status")
+    created_at: datetime = Field(..., description="task creation time")
+    updated_at: datetime = Field(..., description="last update time")
+    progress: float = Field(..., ge=0, le=100, description="progress percentage")
+    parameter_space: Optional[ParameterSpaceReadResponse] = Field(None, description="parameter space definition")
+    strategy: Optional[StrategyReadResponse] = Field(None, description="optimization strategy")
+    initial_designs: Optional[List[Design]] = Field(None, description="initial design points")
+    results: Optional[List[ResultSubmit]] = Field(None, description="submitted results")
+    next_points: Optional[List[Design]] = Field(None, description="next recommended points")
     
     @model_validator(mode='after')
     def check_task_consistency(self):
-        """Ensure task details are consistent with the task status."""
-        # Created tasks should have parameter_space defined
-        if self.status == TaskStatus.CREATED.value and not self.parameter_space:
-            raise ValueError("Created tasks must have a parameter space defined")
+        """ensure the task details are consistent with the task status"""
+        # 已配置的任务应该有参数空间定义
+        if self.status == TaskStatus.CONFIGURED and not self.parameter_space:
+            raise ValueError("configured task must have parameter space definition")
         
-        # Running tasks should have strategy, initial_designs
-        if self.status == TaskStatus.RUNNING.value:
+        # 优化中的任务应该有策略和初始设计
+        if self.status == TaskStatus.OPTIMIZING:
             if not self.strategy:
-                raise ValueError("Running tasks must have a strategy defined")
+                raise ValueError("optimization task must have defined strategy")
             if not self.initial_designs:
-                raise ValueError("Running tasks must have initial designs generated")
+                raise ValueError("optimization task must have generated initial designs")
         
-        # Completed tasks should have results
-        if self.status == TaskStatus.COMPLETED.value and not self.results:
-            raise ValueError("Completed tasks must have results submitted")
+        # 已完成的任务应该有结果
+        if self.status == TaskStatus.COMPLETED and not self.results:
+            raise ValueError("completed task must have submitted results")
         
         return self
 
 
 class TaskStatusUpdateResponse(BaseModel):
-    """Detailed task status response model."""
-    status: str = Field(..., description="Task status")
-    current_iteration: Optional[int] = Field(None, description="Current iteration")
-    total_iterations: Optional[int] = Field(None, description="Total iterations")
-    progress: float = Field(..., ge=0, le=100, description="Progress percentage")
-    last_updated: datetime = Field(..., description="Last update timestamp")
+    """model for detailed task status response"""
+    status: str = Field(..., description="task status")
+    current_iteration: Optional[int] = Field(None, description="current iteration")
+    total_iterations: Optional[int] = Field(None, description="total iterations")
+    progress: float = Field(..., ge=0, le=100, description="progress percentage")
+    last_updated: datetime = Field(..., description="last update timestamp")
     message: Optional[str] = Field(None, description="Status message")
     
     @field_validator('status')

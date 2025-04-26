@@ -9,6 +9,11 @@ import json
 from .parameter_space import ParameterSpace
 from .design_generator import BasicDesignGenerator, DesignType
 from .utils import ensure_directory_exists, generate_unique_id, save_to_json, load_from_json
+from .models.base_model import BaseModel
+from .models.gp_model import GaussianProcessModel
+from .acquisition.ei_numpy import ExpectedImprovement
+from .acquisition.pi_numpy import ProbabilityImprovement
+from .acquisition.ucb_numpy import UpperConfidenceBound
 
 # 设置日志记录器
 logger = logging.getLogger("bo_engine.bo_system")
@@ -19,6 +24,7 @@ class AcquisitionFunction(str, Enum):
     PI = "probability_improvement"  # 改进概率
     UCB = "upper_confidence_bound"  # 置信上界
     LCB = "lower_confidence_bound"  # 置信下界
+    RANDOM = "random"  # 随机采样（作为 fallback）
 
 class BOSystem:
     """贝叶斯优化系统类，整合参数空间、设计生成器和优化算法"""
@@ -225,7 +231,7 @@ class BOSystem:
         Returns:
             List[Dict[str, Any]]: 推荐的设计方案列表
         """
-        # 如果没有足够的观测数据，不能构建代理模型
+        # 如果没有足够的观测数据，不能构建代理模型，使用随机采样
         if len(self.observations) < 2:
             logger.warning("观测数据不足，无法构建代理模型，使用随机采样")
             return self.design_generator.generate_random_designs(n_designs)
@@ -235,68 +241,265 @@ class BOSystem:
         exp_weight = exploration_weight or self.exploration_weight
         
         # 更新代理模型
-        self._update_surrogate_model()
+        model_updated = self._update_surrogate_model()
         
-        # 使用采集函数优化采样
-        # 这里是简化实现，实际上需要根据代理模型预测和不确定性进行优化
-        # 实际实现时，可以使用各种优化器来最大化采集函数
+        # 如果模型更新失败，使用随机采样作为 fallback
+        if not model_updated or self.surrogate_model is None:
+            logger.warning("代理模型更新失败或未初始化，使用随机采样作为 fallback")
+            return self.design_generator.generate_random_designs(n_designs)
         
-        # 生成候选设计
-        n_candidates = max(100, n_designs * 10)
-        candidates = self.design_generator.generate_random_designs(n_candidates)
-        
-        # 计算每个候选设计的采集函数值
-        acq_values = []
-        for design in candidates:
-            acq_value = self._compute_acquisition_value(design, acq_func, exp_weight)
-            acq_values.append(acq_value)
-        
-        # 选择采集函数值最高的设计
-        indices = np.argsort(-np.array(acq_values))[:n_designs]
-        selected_designs = [candidates[i] for i in indices]
+        try:
+            # 获取最佳观测值（用于 EI 和 PI 采集函数）
+            best_f = None
+            if self.best_observation is not None:
+                objective_name = list(self.best_observation["objectives"].keys())[0]
+                best_f = self.best_observation["objectives"][objective_name]
+            
+            # 根据请求的设计方案数量决定策略
+            if n_designs == 1:
+                # 单点推荐：使用采集函数优化
+                next_point_internal, _ = self._optimize_acquisition(acq_func, exp_weight, best_f)
+                
+                # 将内部表示转换回原始参数空间
+                next_point = self.parameter_space.inverse_transform(next_point_internal)
+                return [next_point]
+            else:
+                # 多点推荐：简单方法是生成候选集，根据采集函数值排序选择前 n_designs 个
+                # 更复杂的方法可以使用批量贝叶斯优化技术，如 qEI, DPP
+                n_candidates = max(100, n_designs * 10)
+                candidates_internal = np.random.uniform(0, 1, size=(n_candidates, self.parameter_space.get_internal_dimensions()))
+                
+                # 计算每个候选点的采集函数值
+                acq_values = []
+                for i in range(len(candidates_internal)):
+                    candidate = candidates_internal[i].reshape(1, -1)
+                    acq_value = self._compute_acquisition_value(candidate, acq_func, exp_weight, best_f)
+                    acq_values.append(acq_value)
+                
+                # 选择采集函数值最高的点
+                indices = np.argsort(-np.array(acq_values))[:n_designs]
+                selected_points_internal = candidates_internal[indices]
+                
+                # 将内部表示转换回原始参数空间
+                selected_designs = []
+                for point_internal in selected_points_internal:
+                    point = self.parameter_space.inverse_transform(point_internal)
+                    if self.parameter_space.check_constraints(point):
+                        selected_designs.append(point)
+                
+                # 如果有约束导致某些点被过滤，补充随机点
+                if len(selected_designs) < n_designs:
+                    logger.warning(f"采集函数推荐的点部分不满足约束，补充随机点")
+                    random_designs = self.design_generator.generate_random_designs(n_designs - len(selected_designs))
+                    selected_designs.extend(random_designs)
+                
+                return selected_designs
+        except Exception as e:
+            logger.error(f"采集函数优化过程出错，使用随机采样作为 fallback: {str(e)}", exc_info=True)
+            return self.design_generator.generate_random_designs(n_designs)
         
         # 增加迭代计数
         self.iteration += 1
-        
-        return selected_designs
     
-    def _update_surrogate_model(self) -> None:
+    def _update_surrogate_model(self) -> bool:
         """
         更新代理模型
         
-        注意：实际实现时，这里应该使用高斯过程、随机森林等模型
-        这个方法是一个简化的占位符
+        Returns:
+            bool: 模型是否成功更新
         """
         logger.info("更新代理模型")
         
-        # 实际实现时，应该根据观测数据训练代理模型
-        # self.surrogate_model = ...
+        try:
+            if self.surrogate_model is None:
+                # 初始化代理模型（这里使用高斯过程，实际应用中可根据需求选择不同模型）
+                self.surrogate_model = GaussianProcessModel()
+            
+            # 准备训练数据
+            X = []
+            y = []
+            for obs in self.observations:
+                # 只考虑满足约束的观测
+                if obs["constraints_satisfied"]:
+                    # 将设计点转换为内部表示（标准化到 [0, 1] 空间）
+                    X_point = self.parameter_space.transform(obs["design"])
+                    X.append(X_point)
+                    
+                    # 简单起见，只考虑第一个目标
+                    objective_name = list(obs["objectives"].keys())[0]
+                    y.append(obs["objectives"][objective_name])
+            
+            if len(X) < 2:
+                logger.warning("有效观测数据不足，无法训练代理模型")
+                return False
+            
+            # 转换为数组
+            X = np.array(X)
+            y = np.array(y)
+            
+            # 训练模型
+            self.surrogate_model.fit(X, y)
+            
+            return self.surrogate_model.is_trained()
+        except Exception as e:
+            logger.error(f"更新代理模型失败: {str(e)}", exc_info=True)
+            return False
+    
+    def _optimize_acquisition(
+        self,
+        acquisition_function: AcquisitionFunction,
+        exploration_weight: float,
+        best_f: Optional[float] = None
+    ) -> Tuple[np.ndarray, float]:
+        """
+        优化采集函数，寻找下一个采样点
         
-        # 这里使用一个占位符，表示模型已更新
-        self.surrogate_model = {"updated": True}
+        Args:
+            acquisition_function: 采集函数类型
+            exploration_weight: 探索权重（用于 UCB/LCB）
+            best_f: 当前最佳目标函数值（用于 EI/PI）
+            
+        Returns:
+            Tuple[np.ndarray, float]: (最优点的内部表示, 采集函数值)
+        """
+        # 确定优化方向（默认为最小化）
+        maximize = False
+        if self.parameter_space.objectives:
+            objective_direction = self.parameter_space.objectives[0].get('type', 'minimize').lower()
+            maximize = (objective_direction == 'maximize')
+        
+        # 根据采集函数类型创建相应的采集函数实例
+        acq_instance = None
+        
+        if acquisition_function == AcquisitionFunction.EI:
+            acq_instance = ExpectedImprovement(
+                model=self.surrogate_model,
+                parameter_space=self.parameter_space,
+                xi=0.01,
+                maximize=maximize,
+                best_f=best_f
+            )
+        elif acquisition_function == AcquisitionFunction.PI:
+            acq_instance = ProbabilityImprovement(
+                model=self.surrogate_model,
+                parameter_space=self.parameter_space,
+                xi=0.01,
+                maximize=maximize,
+                best_f=best_f
+            )
+        elif acquisition_function == AcquisitionFunction.UCB:
+            acq_instance = UpperConfidenceBound(
+                model=self.surrogate_model,
+                parameter_space=self.parameter_space,
+                kappa=exploration_weight,
+                maximize=maximize
+            )
+        elif acquisition_function == AcquisitionFunction.RANDOM or acquisition_function == AcquisitionFunction.LCB:
+            # 对于 RANDOM 或尚未实现的 LCB，返回随机点
+            dim = self.parameter_space.get_internal_dimensions()
+            random_point = np.random.uniform(0, 1, size=dim)
+            return random_point.reshape(1, -1), 0.0
+        else:
+            # 默认使用 EI
+            logger.warning(f"未知的采集函数类型 {acquisition_function}，使用 EI 作为默认")
+            acq_instance = ExpectedImprovement(
+                model=self.surrogate_model,
+                parameter_space=self.parameter_space,
+                xi=0.01,
+                maximize=maximize,
+                best_f=best_f
+            )
+        
+        # 通过采集函数的 optimize 方法找到最优点
+        x_best, acq_value = acq_instance.optimize(n_restarts=5, verbose=False)
+        
+        return x_best.reshape(1, -1), acq_value
     
     def _compute_acquisition_value(
         self,
-        design: Dict[str, Any],
+        X: np.ndarray,
         acquisition_function: AcquisitionFunction,
-        exploration_weight: float
+        exploration_weight: float,
+        best_f: Optional[float] = None
     ) -> float:
         """
         计算给定设计方案的采集函数值
         
         Args:
-            design: 设计方案
+            X: 设计方案的内部表示 ([0, 1] 空间)，形状为 (1, n_dims)
             acquisition_function: 采集函数类型
             exploration_weight: 探索权重
+            best_f: 当前最佳目标函数值
             
         Returns:
             float: 采集函数值
         """
-        # 注意：这是一个简化的实现
-        # 实际实现时，应该根据代理模型的预测和不确定性计算采集函数值
+        # 确定优化方向（默认为最小化）
+        maximize = False
+        if self.parameter_space.objectives:
+            objective_direction = self.parameter_space.objectives[0].get('type', 'minimize').lower()
+            maximize = (objective_direction == 'maximize')
         
-        # 对于测试目的，暂时返回一个随机值
-        return self.rng.random()
+        try:
+            # 根据采集函数类型计算采集函数值
+            if acquisition_function == AcquisitionFunction.EI:
+                if best_f is None:
+                    logger.warning("EI 采集函数需要 best_f 值，但未提供")
+                    return 0.0
+                
+                ei = ExpectedImprovement(
+                    model=self.surrogate_model,
+                    parameter_space=self.parameter_space,
+                    xi=0.01,
+                    maximize=maximize,
+                    best_f=best_f
+                )
+                return -ei.evaluate(X)[0]  # 返回负值，使得较大的值被优先选择
+            
+            elif acquisition_function == AcquisitionFunction.PI:
+                if best_f is None:
+                    logger.warning("PI 采集函数需要 best_f 值，但未提供")
+                    return 0.0
+                
+                pi = ProbabilityImprovement(
+                    model=self.surrogate_model,
+                    parameter_space=self.parameter_space,
+                    xi=0.01,
+                    maximize=maximize,
+                    best_f=best_f
+                )
+                return -pi.evaluate(X)[0]  # 返回负值，使得较大的值被优先选择
+            
+            elif acquisition_function == AcquisitionFunction.UCB:
+                ucb = UpperConfidenceBound(
+                    model=self.surrogate_model,
+                    parameter_space=self.parameter_space,
+                    kappa=exploration_weight,
+                    maximize=maximize
+                )
+                return -ucb.evaluate(X)[0]  # 返回负值，使得较小的值（更好的 UCB）被优先选择
+            
+            elif acquisition_function == AcquisitionFunction.LCB:
+                # LCB 可以通过调整 UCB 的 maximize 参数实现
+                lcb = UpperConfidenceBound(
+                    model=self.surrogate_model,
+                    parameter_space=self.parameter_space,
+                    kappa=exploration_weight,
+                    maximize=not maximize  # 反转优化方向
+                )
+                return -lcb.evaluate(X)[0]
+            
+            elif acquisition_function == AcquisitionFunction.RANDOM:
+                # 随机采集函数返回随机值
+                return np.random.rand()
+            
+            else:
+                logger.warning(f"未知的采集函数类型 {acquisition_function}，使用随机值")
+                return np.random.rand()
+        
+        except Exception as e:
+            logger.error(f"计算采集函数值时出错: {str(e)}", exc_info=True)
+            return np.random.rand()  # 出错时返回随机值作为 fallback
     
     def get_optimization_history(self) -> List[Dict[str, Any]]:
         """

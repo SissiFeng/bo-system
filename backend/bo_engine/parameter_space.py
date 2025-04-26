@@ -25,26 +25,42 @@ from .utils import (
 logger = logging.getLogger("bo_engine.parameter_space")
 
 class ParameterType(Enum):
-    """参数类型枚举"""
-    CONTINUOUS = auto()  # 连续参数
-    INTEGER = auto()     # 整数参数
-    CATEGORICAL = auto() # 分类参数
-    ORDINAL = auto()     # 有序分类参数
+    """Parameter type enumeration"""
+    CONTINUOUS = auto()  # Continuous parameter
+    INTEGER = auto()     # Integer parameter
+    CATEGORICAL = auto() # Categorical parameter
+    ORDINAL = auto()     # Ordinal parameter
 
 
-class ObjectiveType(str, Enum):
-    """Enum for objective types."""
+class ObjectiveDirection(str, Enum):
+    """Enum for objective directions."""
     MAXIMIZE = "maximize"
     MINIMIZE = "minimize"
 
 
+class ConstraintRelation(str, Enum):
+    """Enum for constraint relations."""
+    LESS_THAN_OR_EQUAL = "<="
+    GREATER_THAN_OR_EQUAL = ">="
+    EQUAL = "=="
+    CUSTOM = "custom"  # For backward compatibility
+
+
+# For backward compatibility
 class ConstraintType(str, Enum):
-    """Enum for constraint types."""
+    """Enum for constraint types (deprecated, use ConstraintRelation instead)."""
     SUM_EQUALS = "sum_equals"
     SUM_LESS_THAN = "sum_less_than"
     SUM_GREATER_THAN = "sum_greater_than"
     PRODUCT_EQUALS = "product_equals"
     CUSTOM = "custom"
+
+
+# For backward compatibility
+class ObjectiveType(str, Enum):
+    """Enum for objective types (deprecated, use ObjectiveDirection instead)."""
+    MAXIMIZE = "maximize"
+    MINIMIZE = "minimize"
 
 
 class Parameter(ABC):
@@ -780,16 +796,18 @@ class Objective:
     """
     Objective function for optimization.
     """
-    def __init__(self, name: str, objective_type: ObjectiveType):
+    def __init__(self, name: str, objective_type: ObjectiveDirection, weight: float = 1.0):
         """
         Initialize an objective.
         
         Args:
             name: Objective name
             objective_type: Type of objective (maximize or minimize)
+            weight: Weight for this objective in multi-objective optimization (default: 1.0)
         """
         self.name = name
         self.type = objective_type
+        self.weight = weight
     
     def to_dict(self) -> Dict[str, Any]:
         """
@@ -800,7 +818,8 @@ class Objective:
         """
         return {
             "name": self.name,
-            "type": self.type.value
+            "type": self.type.value,
+            "weight": self.weight
         }
     
     @classmethod
@@ -816,7 +835,8 @@ class Objective:
         """
         return cls(
             name=data["name"],
-            objective_type=ObjectiveType(data["type"])
+            objective_type=ObjectiveDirection(data["type"]),
+            weight=data.get("weight", 1.0)
         )
 
 
@@ -824,7 +844,7 @@ class Constraint:
     """
     Constraint for optimization.
     """
-    def __init__(self, expression: str, constraint_type: ConstraintType, value: float):
+    def __init__(self, expression: str, constraint_type: ConstraintRelation, value: float):
         """
         Initialize a constraint.
         
@@ -836,6 +856,7 @@ class Constraint:
         self.expression = expression
         self.type = constraint_type
         self.value = float(value)
+        self._expression_tree = None  # Will be populated by _parse_expression when needed
     
     def evaluate(self, parameters: Dict[str, Any]) -> bool:
         """
@@ -851,29 +872,36 @@ class Constraint:
         result = evaluate_expression(self.expression, parameters)
         
         # Check if constraint is satisfied
-        if self.type == ConstraintType.SUM_EQUALS:
-            return abs(result - self.value) < 1e-6
-        elif self.type == ConstraintType.SUM_LESS_THAN:
-            return result < self.value
-        elif self.type == ConstraintType.SUM_GREATER_THAN:
-            return result > self.value
-        elif self.type == ConstraintType.PRODUCT_EQUALS:
+        if self.type == ConstraintRelation.LESS_THAN_OR_EQUAL:
+            return result <= self.value
+        elif self.type == ConstraintRelation.GREATER_THAN_OR_EQUAL:
+            return result >= self.value
+        elif self.type == ConstraintRelation.EQUAL:
             return abs(result - self.value) < 1e-6
         else:  # CUSTOM
             return abs(result) < 1e-6
     
     def to_dict(self) -> Dict[str, Any]:
         """
-        Convert constraint to dictionary representation.
+        Convert constraint to dictionary representation with expression tree for visualization.
         
         Returns:
             Dict[str, Any]: Dictionary representation
         """
-        return {
+        result = {
             "expression": self.expression,
             "type": self.type.value,
             "value": self.value
         }
+        
+        # Add expression tree for visualization if needed
+        if self._expression_tree is None:
+            self._parse_expression()
+        
+        if self._expression_tree:
+            result["expression_tree"] = self._expression_tree
+            
+        return result
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Constraint':
@@ -886,60 +914,437 @@ class Constraint:
         Returns:
             Constraint: Created constraint
         """
-        return cls(
+        constraint = cls(
             expression=data["expression"],
-            constraint_type=ConstraintType(data["type"]),
+            constraint_type=ConstraintRelation(data["type"]),
             value=data["value"]
+        )
+        
+        # If expression tree is provided, store it directly
+        if "expression_tree" in data:
+            constraint._expression_tree = data["expression_tree"]
+            
+        return constraint
+    
+    def _parse_expression(self):
+        """
+        Parse the expression into a tree structure for visualization.
+        This is a simple implementation that can be enhanced for more complex expressions.
+        """
+        try:
+            # This is a placeholder implementation
+            # For a real implementation, you would use a proper parser
+            # Below is just a simple structure to demonstrate the concept
+            if "<=" in self.expression:
+                left, right = self.expression.split("<=")
+                op = "<="
+            elif ">=" in self.expression:
+                left, right = self.expression.split(">=")
+                op = ">="
+            elif "==" in self.expression:
+                left, right = self.expression.split("==")
+                op = "=="
+            else:
+                # Default case or other operators
+                self._expression_tree = {"type": "raw", "expression": self.expression}
+                return
+                
+            # Create a simple tree
+            self._expression_tree = {
+                "type": "operation",
+                "operator": op,
+                "left": self._parse_expression_term(left.strip()),
+                "right": self._parse_expression_term(right.strip())
+            }
+        except Exception as e:
+            logger.warning(f"Failed to parse expression '{self.expression}' into tree: {str(e)}")
+            self._expression_tree = {"type": "raw", "expression": self.expression}
+    
+    def _parse_expression_term(self, term: str) -> Dict[str, Any]:
+        """
+        Parse an expression term into a tree node.
+        
+        Args:
+            term: Expression term to parse
+            
+        Returns:
+            Dict[str, Any]: Tree node representing the term
+        """
+        # Very simple parsing logic - this should be replaced with a proper parser
+        if "+" in term:
+            parts = term.split("+")
+            return {
+                "type": "operation",
+                "operator": "+",
+                "operands": [self._parse_expression_term(p.strip()) for p in parts if p.strip()]
+            }
+        elif "*" in term:
+            parts = term.split("*")
+            return {
+                "type": "operation",
+                "operator": "*",
+                "operands": [self._parse_expression_term(p.strip()) for p in parts if p.strip()]
+            }
+        else:
+            # Try to parse as a number
+            try:
+                value = float(term)
+                return {"type": "constant", "value": value}
+            except ValueError:
+                # It's a variable
+                return {"type": "variable", "name": term}
+
+
+class ParameterGroup(ABC):
+    """
+    Abstract base class for groups of related parameters.
+    """
+    
+    def __init__(self, name: str, parameters: List[str], description: str = ""):
+        """
+        Initialize a parameter group.
+        
+        Args:
+            name: Name of the parameter group
+            parameters: List of parameter names in the group
+            description: Description of the parameter group
+        """
+        self.name = name
+        self.parameters = parameters
+        self.description = description
+    
+    @abstractmethod
+    def validate(self, values: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Validate that the parameter values satisfy the group constraints.
+        
+        Args:
+            values: Dictionary of parameter values
+            
+        Returns:
+            Tuple[bool, str]: (is_valid, error_message)
+        """
+        pass
+    
+    @abstractmethod
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert parameter group to dictionary representation.
+        
+        Returns:
+            Dict[str, Any]: Dictionary representation
+        """
+        pass
+    
+    @classmethod
+    @abstractmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'ParameterGroup':
+        """
+        Create parameter group from dictionary representation.
+        
+        Args:
+            data: Dictionary with parameter group definition
+            
+        Returns:
+            ParameterGroup: Created parameter group
+        """
+        pass
+
+
+class SimplexGroup(ParameterGroup):
+    """
+    Group of parameters that must sum to 1 (simplex constraint).
+    Useful for representing compositions, e.g., metal alloy components.
+    """
+    
+    def __init__(self, name: str, parameters: List[str], description: str = "", tolerance: float = 1e-6):
+        """
+        Initialize a simplex parameter group.
+        
+        Args:
+            name: Name of the parameter group
+            parameters: List of parameter names in the group
+            description: Description of the parameter group
+            tolerance: Tolerance for the sum to be considered equal to 1
+        """
+        super().__init__(name, parameters, description)
+        self.tolerance = tolerance
+    
+    def validate(self, values: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Validate that the parameter values sum to 1 (within tolerance).
+        
+        Args:
+            values: Dictionary of parameter values
+            
+        Returns:
+            Tuple[bool, str]: (is_valid, error_message)
+        """
+        # Check if all parameters are present
+        for param in self.parameters:
+            if param not in values:
+                return False, f"Missing parameter '{param}' in simplex group '{self.name}'"
+        
+        # Check if the sum is 1 (within tolerance)
+        param_sum = sum(values[param] for param in self.parameters)
+        if abs(param_sum - 1.0) > self.tolerance:
+            return False, f"Parameters in simplex group '{self.name}' sum to {param_sum}, which is not 1.0 (±{self.tolerance})"
+        
+        return True, ""
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert simplex group to dictionary representation.
+        
+        Returns:
+            Dict[str, Any]: Dictionary representation
+        """
+        return {
+            "type": "simplex",
+            "name": self.name,
+            "parameters": self.parameters,
+            "description": self.description,
+            "tolerance": self.tolerance
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SimplexGroup':
+        """
+        Create simplex group from dictionary representation.
+        
+        Args:
+            data: Dictionary with simplex group definition
+            
+        Returns:
+            SimplexGroup: Created simplex group
+        """
+        return cls(
+            name=data["name"],
+            parameters=data["parameters"],
+            description=data.get("description", ""),
+            tolerance=data.get("tolerance", 1e-6)
         )
 
 
 class ParameterSpace:
     """
-    参数空间类，用于定义优化问题的参数空间和约束条件
+    Parameter space class for defining optimization parameters and constraints
     """
 
     def __init__(
         self,
         parameters: Dict[str, Dict[str, Any]],
-        constraints: Optional[List[Dict[str, Any]]] = None
+        constraints: Optional[List[Dict[str, Any]]] = None,
+        name: str = "Optimization Task",
+        objectives: Optional[List[Dict[str, Any]]] = None,
+        description: str = "",
+        parameter_groups: Optional[List[Dict[str, Any]]] = None
     ):
         """
-        初始化参数空间
+        Initialize parameter space
         
         Args:
-            parameters: 参数定义字典，格式为：
-                {
-                    "param_name": {
-                        "type": "continuous" | "integer" | "categorical",
-                        "min": float,  # 对于连续和整数参数
-                        "max": float,  # 对于连续和整数参数
-                        "categories": List[Any],  # 对于分类参数
-                        "units": str,  # 可选，参数单位
-                        "description": str  # 可选，参数描述
-                    },
-                    ...
-                }
-            constraints: 约束条件列表，格式为：
-                [
-                    {
-                        "type": "linear" | "nonlinear",
-                        "expression": str,  # 约束表达式
-                        "description": str  # 可选，约束描述
-                    },
-                    ...
-                ]
+            parameters: Parameter definition dictionary
+            constraints: List of constraints
+            name: Name of the optimization task
+            objectives: List of objectives
+            description: Description of the parameter space
+            parameter_groups: List of parameter groups (optional)
         """
         self.parameters = parameters
         self.constraints = constraints or []
+        self.name = name
+        self.objectives = objectives or []
+        self.description = description
+        self.parameter_groups = parameter_groups or []
         
-        # 验证参数定义
+        # Validate parameter definitions
         self._validate_parameters()
         
-        # 验证约束条件
+        # Validate constraints
         self._validate_constraints()
         
-        logger.info(f"初始化参数空间，参数数量: {len(parameters)}，约束条件数量: {len(self.constraints)}")
+        # Validate parameter groups
+        self._validate_parameter_groups()
+        
+        logger.info(f"Initialized parameter space, parameters: {len(parameters)}, constraints: {len(self.constraints)}, parameter groups: {len(self.parameter_groups)}")
 
+    @classmethod
+    def from_api_config(cls, config: Dict[str, Any]) -> 'ParameterSpace':
+        """
+        Create a parameter space from the API's declarative configuration format
+        
+        Args:
+            config: API configuration dictionary with the following structure:
+                {
+                    "name": "Task name",
+                    "parameters": [
+                        {
+                            "name": "param1",
+                            "type": "continuous",
+                            "bounds": [min, max],
+                            "log_scale": false
+                        },
+                        {
+                            "name": "param2",
+                            "type": "integer",
+                            "bounds": [min, max]
+                        },
+                        {
+                            "name": "param3",
+                            "type": "categorical",
+                            "categories": ["cat1", "cat2", ...]
+                        }
+                    ],
+                    "objectives": [
+                        {
+                            "name": "obj1",
+                            "direction": "minimize"
+                        }
+                    ],
+                    "constraints": [
+                        {
+                            "name": "constraint1",
+                            "parameters": ["param1", "param2"],
+                            "relation": "<=",
+                            "threshold": 10.0
+                        }
+                    ],
+                    "description": "Optional description"
+                }
+                
+        Returns:
+            ParameterSpace: Created parameter space object
+        """
+        # Extract basic info
+        name = config.get("name", "Optimization Task")
+        description = config.get("description", "")
+        
+        # Convert parameters from list to dictionary format
+        parameters_dict = {}
+        for param_config in config.get("parameters", []):
+            param_name = param_config["name"]
+            param_type = param_config["type"].lower()
+            
+            param_dict = {
+                "type": param_type,
+                "description": param_config.get("description", "")
+            }
+            
+            # Add type-specific fields
+            if param_type in ["continuous", "integer"]:
+                param_dict["min"] = param_config["bounds"][0]
+                param_dict["max"] = param_config["bounds"][1]
+                if "log_scale" in param_config:
+                    param_dict["log_scale"] = param_config["log_scale"]
+                if "precision" in param_config and param_type == "continuous":
+                    param_dict["precision"] = param_config["precision"]
+            
+            elif param_type == "categorical":
+                param_dict["categories"] = param_config["categories"]
+            
+            parameters_dict[param_name] = param_dict
+        
+        # Convert objectives to the internal format
+        objectives = []
+        for obj_config in config.get("objectives", []):
+            objectives.append({
+                "name": obj_config["name"],
+                "type": obj_config["direction"]  # Use direction as type for compatibility
+            })
+        
+        # Convert constraints to the internal format
+        constraints = []
+        for constraint_config in config.get("constraints", []):
+            # For simple linear constraints (sum type)
+            if len(constraint_config["parameters"]) > 0:
+                params = constraint_config["parameters"]
+                relation = constraint_config["relation"]
+                threshold = constraint_config["threshold"]
+                
+                # Build an expression based on parameters
+                if len(params) == 1:
+                    # Single parameter constraint: param <= threshold
+                    expression = f"{params[0]} {relation} {threshold}"
+                else:
+                    # Multi-parameter constraint: sum(params) <= threshold
+                    params_expr = " + ".join(params)
+                    expression = f"{params_expr} {relation} {threshold}"
+                
+                # Map relation to constraint type
+                constraint_type = "nonlinear"  # Default to nonlinear for flexibility
+                constraints.append({
+                    "type": constraint_type,
+                    "expression": expression,
+                    "description": constraint_config.get("name", "")
+                })
+        
+        # Create and return the parameter space
+        return cls(
+            parameters=parameters_dict,
+            constraints=constraints,
+            name=name,
+            objectives=objectives,
+            description=description
+        )
+
+    def to_api_config(self) -> Dict[str, Any]:
+        """
+        Convert parameter space to the API's declarative configuration format
+        
+        Returns:
+            Dict[str, Any]: API configuration dictionary
+        """
+        # Convert parameters to list format
+        parameters = []
+        for param_name, param_config in self.parameters.items():
+            param_type = param_config["type"]
+            
+            if param_type in ["continuous", "integer"]:
+                parameter = {
+                    "name": param_name,
+                    "type": param_type,
+                    "bounds": [param_config["min"], param_config["max"]]
+                }
+                
+                # Add optional fields if present
+                if "log_scale" in param_config:
+                    parameter["log_scale"] = param_config["log_scale"]
+                if "precision" in param_config and param_type == "continuous":
+                    parameter["precision"] = param_config["precision"]
+                
+            elif param_type == "categorical":
+                parameter = {
+                    "name": param_name,
+                    "type": param_type,
+                    "categories": param_config["categories"]
+                }
+            
+            # Add description if present
+            if "description" in param_config:
+                parameter["description"] = param_config["description"]
+            
+            parameters.append(parameter)
+        
+        # Convert objectives
+        objectives = []
+        for obj in self.objectives:
+            objectives.append({
+                "name": obj["name"],
+                "direction": obj["type"]  # Use type as direction for compatibility
+            })
+        
+        # For now, we don't convert constraints back to API format as it's complex
+        # This can be improved in the future if needed
+        
+        return {
+            "name": self.name,
+            "parameters": parameters,
+            "objectives": objectives,
+            "description": self.description
+            # constraints are omitted for now
+        }
+    
     def validate(self) -> Tuple[bool, str]:
         """
         验证参数空间配置是否有效
@@ -950,6 +1355,7 @@ class ParameterSpace:
         try:
             self._validate_parameters()
             self._validate_constraints()
+            self._validate_parameter_groups()
             return True, ""
         except ValueError as e:
             return False, str(e)
@@ -1013,9 +1419,9 @@ class ParameterSpace:
             if "type" not in constraint:
                 raise ValueError(f"约束条件 #{i} 缺少 'type' 字段")
             
-            constraint_type = constraint["type"].lower()
-            if constraint_type not in ["linear", "nonlinear"]:
-                raise ValueError(f"约束条件 #{i} 的类型 '{constraint_type}' 无效，有效类型为: linear, nonlinear")
+            constraint_type = constraint["type"]
+            if constraint_type not in [ConstraintRelation.LESS_THAN_OR_EQUAL, ConstraintRelation.GREATER_THAN_OR_EQUAL, ConstraintRelation.EQUAL]:
+                raise ValueError(f"约束条件 #{i} 的类型 '{constraint_type}' 无效，有效类型为: {ConstraintRelation.LESS_THAN_OR_EQUAL}, {ConstraintRelation.GREATER_THAN_OR_EQUAL}, {ConstraintRelation.EQUAL}")
             
             # 检查约束表达式
             if "expression" not in constraint:
@@ -1023,6 +1429,27 @@ class ParameterSpace:
             
             # 存储小写的约束类型
             constraint["type"] = constraint_type
+
+    def _validate_parameter_groups(self):
+        """
+        Validate parameter groups to ensure all referenced parameters exist
+        """
+        for i, group_config in enumerate(self.parameter_groups):
+            # Check group type
+            if "type" not in group_config:
+                raise ValueError(f"Parameter group #{i} is missing 'type' field")
+            
+            group_type = group_config["type"]
+            if group_type not in ["simplex"]:  # Add more types as implemented
+                raise ValueError(f"Parameter group #{i} has invalid type '{group_type}'")
+            
+            # Check if parameters exist
+            if "parameters" not in group_config:
+                raise ValueError(f"Parameter group #{i} is missing 'parameters' field")
+            
+            for param_name in group_config["parameters"]:
+                if param_name not in self.parameters:
+                    raise ValueError(f"Parameter group #{i} references non-existent parameter '{param_name}'")
 
     def get_parameters(self) -> Dict[str, Dict[str, Any]]:
         """
@@ -1142,20 +1569,25 @@ class ParameterSpace:
             constraint_type = constraint["type"]
             expression = constraint["expression"]
             
-            if constraint_type == "linear":
+            if constraint_type == ConstraintRelation.LESS_THAN_OR_EQUAL:
                 # 线性约束，格式为: a1*x1 + a2*x2 + ... + an*xn <= b
-                # 或者: a1*x1 + a2*x2 + ... + an*xn >= b
                 result = self._evaluate_linear_constraint(expression, design)
                 if not result:
                     logger.debug(f"设计方案不满足线性约束: {expression}")
                     return False
             
-            elif constraint_type == "nonlinear":
-                # 非线性约束，使用eval评估表达式
-                # 不安全，但是在可信环境中使用
-                result = self._evaluate_nonlinear_constraint(expression, design)
+            elif constraint_type == ConstraintRelation.GREATER_THAN_OR_EQUAL:
+                # 线性约束，格式为: a1*x1 + a2*x2 + ... + an*xn >= b
+                result = self._evaluate_linear_constraint(expression, design)
                 if not result:
-                    logger.debug(f"设计方案不满足非线性约束: {expression}")
+                    logger.debug(f"设计方案不满足线性约束: {expression}")
+                    return False
+            
+            elif constraint_type == ConstraintRelation.EQUAL:
+                # 线性约束，格式为: a1*x1 + a2*x2 + ... + an*xn == b
+                result = self._evaluate_linear_constraint(expression, design)
+                if not result:
+                    logger.debug(f"设计方案不满足线性约束: {expression}")
                     return False
         
         return True
@@ -1419,50 +1851,65 @@ class ParameterSpace:
 
     def validate_point(self, point: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        验证点是否满足参数空间的所有要求
+        Validate that a point is valid according to parameter definitions, constraints, and parameter groups
         
         Args:
-            point: 参数点
+            point: Point to validate
             
         Returns:
-            Tuple[bool, str]: (是否有效, 错误信息)
+            Tuple[bool, str]: (is_valid, error_message)
         """
-        # 检查参数是否完整
+        # Check that all required parameters are present
         for param_name in self.parameters:
             if param_name not in point:
-                return False, f"缺少参数: {param_name}"
+                return False, f"Missing parameter: {param_name}"
         
-        # 检查参数类型和范围
-        for param_name, param_config in self.parameters.items():
-            value = point[param_name]
+        # Check individual parameter constraints
+        for param_name, value in point.items():
+            if param_name not in self.parameters:
+                return False, f"Unknown parameter: {param_name}"
+            
+            param_config = self.parameters[param_name]
             param_type = param_config["type"]
             
+            # Check type-specific constraints
             if param_type == "continuous":
                 if not isinstance(value, (int, float)):
-                    return False, f"参数 {param_name} 应为数值类型，但得到 {type(value)}"
+                    return False, f"Parameter {param_name} expects a number, got {type(value).__name__}"
                 
                 min_val = param_config["min"]
                 max_val = param_config["max"]
                 if value < min_val or value > max_val:
-                    return False, f"参数 {param_name} 的值 {value} 超出范围 [{min_val}, {max_val}]"
+                    return False, f"Parameter {param_name} value {value} is outside bounds [{min_val}, {max_val}]"
             
             elif param_type == "integer":
                 if not isinstance(value, int):
-                    return False, f"参数 {param_name} 应为整数类型，但得到 {type(value)}"
+                    return False, f"Parameter {param_name} expects an integer, got {type(value).__name__}"
                 
                 min_val = param_config["min"]
                 max_val = param_config["max"]
                 if value < min_val or value > max_val:
-                    return False, f"参数 {param_name} 的值 {value} 超出范围 [{min_val}, {max_val}]"
+                    return False, f"Parameter {param_name} value {value} is outside bounds [{min_val}, {max_val}]"
             
             elif param_type == "categorical":
-                categories = param_config["categories"]
-                if value not in categories:
-                    return False, f"参数 {param_name} 的值 {value} 不在有效类别中: {categories}"
+                if value not in param_config["categories"]:
+                    categories_str = ", ".join(str(c) for c in param_config["categories"])
+                    return False, f"Parameter {param_name} value '{value}' is not one of the allowed categories: {categories_str}"
         
-        # 检查约束条件
-        if self.constraints and not self.check_constraints(point):
-            return False, "不满足约束条件"
+        # Check parameter group constraints
+        for group_config in self.parameter_groups:
+            group_type = group_config["type"]
+            
+            if group_type == "simplex":
+                group = SimplexGroup.from_dict(group_config)
+                is_valid, error_msg = group.validate(point)
+                if not is_valid:
+                    return False, error_msg
+        
+        # Check general constraints
+        # (This is already implemented in the check_constraints method)
+        if not self.check_constraints(point):
+            return False, "Point does not satisfy one or more constraints"
         
         return True, ""
 
@@ -1578,31 +2025,44 @@ class ParameterSpace:
 
     def to_dict(self) -> Dict[str, Any]:
         """
-        将参数空间转换为字典表示
+        Convert parameter space to dictionary representation
         
         Returns:
-            Dict[str, Any]: 参数空间的字典表示
+            Dict[str, Any]: Dictionary representation
         """
-        return {
+        result = {
+            "name": self.name,
             "parameters": self.parameters,
-            "constraints": self.constraints
+            "constraints": self.constraints,
+            "objectives": self.objectives,
+            "description": self.description
         }
+        
+        # Add parameter groups if present
+        if self.parameter_groups:
+            result["parameter_groups"] = self.parameter_groups
+            
+        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ParameterSpace':
         """
-        从字典创建参数空间
+        Create parameter space from dictionary representation
         
         Args:
-            data: 参数空间的字典表示
+            data: Dictionary with parameter space definition
             
         Returns:
-            ParameterSpace: 参数空间对象
+            ParameterSpace: Created parameter space
         """
-        parameters = data.get("parameters", {})
-        constraints = data.get("constraints", [])
-        
-        return cls(parameters, constraints)
+        return cls(
+            parameters=data["parameters"],
+            constraints=data.get("constraints", []),
+            name=data.get("name", "Optimization Task"),
+            objectives=data.get("objectives", []),
+            description=data.get("description", ""),
+            parameter_groups=data.get("parameter_groups", [])
+        )
 
     def save(self, filepath: str):
         """

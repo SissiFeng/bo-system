@@ -21,12 +21,6 @@ from backend.bo_engine.optimizer import BayesianOptimizer
 from backend.bo_engine.models import GaussianProcessModel
 from backend.bo_engine.acquisition import ExpectedImprovement
 
-# Import core BO engine components
-# These will be implemented in Phase 2-4
-# from backend.bo_engine.parameter_space import ParameterSpace
-# from backend.bo_engine.design_generator import DesignGenerator
-# from backend.bo_engine.optimizer import Optimizer
-
 # Setup
 settings = get_settings()
 logger = setup_logger("api")
@@ -74,61 +68,9 @@ def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
     try:
         with open(ps_file, "r") as f:
             ps_config = json.load(f)
-        # 转换API参数空间格式到BO引擎参数空间格式
-        bo_format = {
-            "parameters": {},
-            "constraints": []
-        }
         
-        # 处理参数
-        if "parameters" in ps_config:
-            for param_name, param_data in ps_config["parameters"].items():
-                param_type = param_data.get("type", "")
-                bo_param = {"type": param_type}
-                
-                # 复制其他属性
-                if param_type == "continuous":
-                    bo_param["min"] = param_data.get("min", 0)
-                    bo_param["max"] = param_data.get("max", 1)
-                    # 复制可选属性
-                    if "description" in param_data:
-                        bo_param["description"] = param_data["description"]
-                    
-                elif param_type == "discrete":
-                    # 转换为integer类型
-                    bo_param["type"] = "integer"
-                    bo_param["min"] = param_data.get("min", 0)
-                    bo_param["max"] = param_data.get("max", 1)
-                    # 复制可选属性
-                    if "description" in param_data:
-                        bo_param["description"] = param_data["description"]
-                    
-                elif param_type == "categorical":
-                    # 转换values到categories
-                    if "values" in param_data:
-                        bo_param["categories"] = param_data["values"]
-                    else:
-                        bo_param["categories"] = param_data.get("categories", [])
-                    # 复制可选属性
-                    if "description" in param_data:
-                        bo_param["description"] = param_data["description"]
-                
-                bo_format["parameters"][param_name] = bo_param
-        
-        # 转换约束条件（如果有）
-        if "constraints" in ps_config and isinstance(ps_config["constraints"], dict):
-            for constraint_name, constraint_data in ps_config["constraints"].items():
-                # 注意：此处假设Bo引擎的约束格式不同，需要调整
-                constraint = {
-                    "name": constraint_name,
-                    "type": constraint_data.get("type", ""),
-                    "expression": constraint_data.get("expression", ""),
-                    "value": constraint_data.get("threshold", 0.0)
-                }
-                bo_format["constraints"].append(constraint)
-        
-        # Note: Assumes ParameterSpace has a class method `from_dict` to reconstruct from JSON config
-        parameter_space_obj = ParameterSpace.from_dict(bo_format)
+        # Create parameter space from API config
+        parameter_space_obj = ParameterSpace.from_api_config(ps_config)
         logger.info(f"Successfully loaded parameter space for task {task_id}")
     except Exception as e:
         logger.error(f"Failed to load or reconstruct parameter space for task {task_id} from {ps_file}: {e}", exc_info=True)
@@ -147,15 +89,15 @@ def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
                 strategy_config = json.load(f)
             logger.info(f"Successfully loaded strategy config from {strategy_file}")
             
-            # Map strategy.algorithm to model class if applicable
-            algorithm = strategy_config.get("algorithm", "").lower()
-            if algorithm == "gaussian_process" or algorithm == "gp":
+            # Map strategy model_type to model class
+            model_type = strategy_config.get("model_type", "").lower()
+            if model_type == "gp" or model_type == "gaussian_process":
                 model_class = GaussianProcessModel
-            # Add mappings for other algorithms as they are implemented
+            # Add mappings for other model types as they are implemented
             
             # Extract acquisition function
-            acq_function = strategy_config.get("acquisition_function", "").lower()
-            if acq_function == "ei" or acq_function == "expected_improvement":
+            acq_type = strategy_config.get("acquisition_type", "").lower()
+            if acq_type == "ei" or acq_type == "expected_improvement":
                 acquisition_class = ExpectedImprovement
             # Add mappings for other acquisition functions as they are implemented
             
@@ -235,19 +177,19 @@ def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
 
 # ----- 1. Parameter Space Configuration API -----
 
-@router.post("/parameter-space", response_model=schema.ParameterSpaceCreationResponse)
-async def create_parameter_space(data: schema.ParameterSpaceCreate):
+@router.post("/parameter-space", response_model=schema.ParameterSpaceCreateResponse)
+async def create_parameter_space(data: schema.ParameterSpaceConfig):
     """
-    Create a new optimization task by defining a parameter space.
+    Create a new optimization task by defining a parameter space using the declarative configuration format.
     """
     logger.info(f"Creating parameter space: {data.name}")
     
     # Generate a unique task ID
     task_id = generate_id()
     
-    # Store the parameter space (in-memory for now)
+    # Store the parameter space with response model
     now = datetime.now()
-    parameter_spaces[task_id] = schema.ParameterSpaceRead(
+    parameter_spaces[task_id] = schema.ParameterSpaceReadResponse(
         **data.dict(),
         task_id=task_id,
         created_at=now,
@@ -258,11 +200,11 @@ async def create_parameter_space(data: schema.ParameterSpaceCreate):
     task_info = {
         "task_id": task_id,
         "name": data.name,
-        "status": schema.TaskStatus.CREATED.value,
+        "status": schema.TaskStatus.CONFIGURED.value,  # Updated status to CONFIGURED
         "created_at": now,
         "updated_at": now,
         "progress": 0.0,  # Initial progress is 0%
-        "description": data.dict().get("description", ""),  # Optional description
+        "description": data.description or "",  # Optional description
     }
     tasks[task_id] = task_info
     
@@ -278,14 +220,13 @@ async def create_parameter_space(data: schema.ParameterSpaceCreate):
     with open(task_dir / "task_info.json", "w") as f:
         json.dump(task_info, f, default=str)
     
-    return schema.ParameterSpaceCreationResponse(
+    return schema.ParameterSpaceCreateResponse(
         task_id=task_id,
-        status=schema.TaskStatus.CREATED.value,
         message=f"Parameter space '{data.name}' created successfully",
     )
 
 
-@router.get("/parameter-space/{task_id}", response_model=schema.ParameterSpaceRead)
+@router.get("/parameter-space/{task_id}", response_model=schema.ParameterSpaceReadResponse)
 async def get_parameter_space(task_id: str = Path(..., description="Task ID")):
     """
     Get the parameter space for a specific task.
@@ -296,9 +237,9 @@ async def get_parameter_space(task_id: str = Path(..., description="Task ID")):
     return parameter_spaces[task_id]
 
 
-@router.put("/parameter-space/{task_id}", response_model=schema.ParameterSpaceCreationResponse)
+@router.put("/parameter-space/{task_id}", response_model=schema.ParameterSpaceCreateResponse)
 async def update_parameter_space(
-    data: schema.ParameterSpaceCreate,
+    data: schema.ParameterSpaceConfig,
     task_id: str = Path(..., description="Task ID"),
 ):
     """
@@ -309,7 +250,7 @@ async def update_parameter_space(
     
     # Update parameter space
     now = datetime.now()
-    parameter_spaces[task_id] = schema.ParameterSpaceRead(
+    parameter_spaces[task_id] = schema.ParameterSpaceReadResponse(
         **data.dict(),
         task_id=task_id,
         created_at=parameter_spaces[task_id].created_at,
@@ -325,9 +266,8 @@ async def update_parameter_space(
     with open(task_dir / "parameter_space.json", "w") as f:
         json.dump(parameter_spaces[task_id].dict(), f, default=str)
     
-    return schema.ParameterSpaceCreationResponse(
+    return schema.ParameterSpaceCreateResponse(
         task_id=task_id,
-        status=schema.TaskStatus.CREATED.value,
         message=f"Parameter space updated successfully",
     )
 
@@ -391,61 +331,9 @@ async def get_initial_designs(
     try:
         with open(ps_file, "r") as f:
             ps_config = json.load(f)
-        # 转换API参数空间格式到BO引擎参数空间格式
-        bo_format = {
-            "parameters": {},
-            "constraints": []
-        }
         
-        # 处理参数
-        if "parameters" in ps_config:
-            for param_name, param_data in ps_config["parameters"].items():
-                param_type = param_data.get("type", "")
-                bo_param = {"type": param_type}
-                
-                # 复制其他属性
-                if param_type == "continuous":
-                    bo_param["min"] = param_data.get("min", 0)
-                    bo_param["max"] = param_data.get("max", 1)
-                    # 复制可选属性
-                    if "description" in param_data:
-                        bo_param["description"] = param_data["description"]
-                    
-                elif param_type == "discrete":
-                    # 转换为integer类型
-                    bo_param["type"] = "integer"
-                    bo_param["min"] = param_data.get("min", 0)
-                    bo_param["max"] = param_data.get("max", 1)
-                    # 复制可选属性
-                    if "description" in param_data:
-                        bo_param["description"] = param_data["description"]
-                    
-                elif param_type == "categorical":
-                    # 转换values到categories
-                    if "values" in param_data:
-                        bo_param["categories"] = param_data["values"]
-                    else:
-                        bo_param["categories"] = param_data.get("categories", [])
-                    # 复制可选属性
-                    if "description" in param_data:
-                        bo_param["description"] = param_data["description"]
-                
-                bo_format["parameters"][param_name] = bo_param
-        
-        # 转换约束条件（如果有）
-        if "constraints" in ps_config and isinstance(ps_config["constraints"], dict):
-            for constraint_name, constraint_data in ps_config["constraints"].items():
-                # 注意：此处假设Bo引擎的约束格式不同，需要调整
-                constraint = {
-                    "name": constraint_name,
-                    "type": constraint_data.get("type", ""),
-                    "expression": constraint_data.get("expression", ""),
-                    "value": constraint_data.get("threshold", 0.0)
-                }
-                bo_format["constraints"].append(constraint)
-        
-        # Note: Assumes ParameterSpace has a class method `from_dict` to reconstruct from JSON config
-        parameter_space_obj = ParameterSpace.from_dict(bo_format)
+        # Create parameter space from API config
+        parameter_space_obj = ParameterSpace.from_api_config(ps_config)
         logger.info(f"Successfully loaded parameter space for task {task_id}")
     except Exception as e:
         logger.error(f"Failed to load or reconstruct parameter space for task {task_id} from {ps_file}: {e}", exc_info=True)
@@ -465,14 +353,41 @@ async def get_initial_designs(
             logger.warning(f"Failed to load or parse existing designs file {designs_file} for task {task_id}: {e}. Regenerating.", exc_info=True)
             # If loading fails, proceed to generate new ones
 
-    # --- Generate Initial Designs ---
+    # --- Get Strategy Information ---
+    strategy_file = task_dir / "strategy.json"
+    design_type = DesignType.LATIN_HYPERCUBE  # Default design type
     n_samples = samples or settings.DEFAULT_INITIAL_SAMPLES
-    # For now, default to LHS. This could be made configurable later.
-    design_type = DesignType.LATIN_HYPERCUBE
+    
+    if strategy_file.exists():
+        try:
+            with open(strategy_file, "r") as f:
+                strategy_config = json.load(f)
+            
+            # Get design type from strategy if available
+            if "initial_design_type" in strategy_config:
+                design_type_str = strategy_config["initial_design_type"].lower()
+                if design_type_str == "lhs" or design_type_str == "latin_hypercube":
+                    design_type = DesignType.LATIN_HYPERCUBE
+                elif design_type_str == "random":
+                    design_type = DesignType.RANDOM
+                elif design_type_str == "sobol":
+                    design_type = DesignType.SOBOL
+                elif design_type_str == "factorial" or design_type_str == "grid":
+                    design_type = DesignType.FACTORIAL
+                else:
+                    logger.warning(f"Unknown design type '{design_type_str}', using default {design_type.value}")
+            
+            # Get number of initial points from strategy if available
+            if "n_initial_points" in strategy_config:
+                n_samples = strategy_config["n_initial_points"]
+                logger.info(f"Using n_initial_points={n_samples} from strategy")
+        except Exception as e:
+            logger.warning(f"Failed to load or parse strategy file {strategy_file} for task {task_id}: {e}. Using defaults.", exc_info=True)
 
+    # --- Generate Initial Designs ---
     try:
         logger.info(f"Generating {n_samples} initial designs using {design_type.value} for task {task_id}")
-        # Create the design generator (seed handling might be internal or added here)
+        # Create the design generator 
         design_generator = create_design_generator(parameter_space_obj, design_type)
 
         # Generate design points (list of dictionaries: {param_name: value})
@@ -489,7 +404,6 @@ async def get_initial_designs(
         if len(final_designs) < n_samples:
              logger.warning(f"Only generated {len(final_designs)} designs out of {n_samples} requested for task {task_id}, possibly due to constraints.")
 
-
     except Exception as e:
         logger.error(f"Failed to generate initial designs for task {task_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to generate initial designs: {str(e)}")
@@ -498,12 +412,21 @@ async def get_initial_designs(
     try:
         with open(designs_file, "w") as f:
             # Convert Pydantic models to dicts for JSON serialization
-            json.dump([d.dict() for d in final_designs], f, indent=4)
-        logger.info(f"Saved {len(final_designs)} initial designs to {designs_file} for task {task_id}")
+            json.dump([d.dict() for d in final_designs], f)
+        logger.info(f"Saved {len(final_designs)} designs to {designs_file}")
+        
+        # Update task status if needed
+        if task_id in tasks:
+            tasks[task_id]["status"] = schema.TaskStatus.READY_FOR_RESULTS.value
+            tasks[task_id]["updated_at"] = datetime.now()
+            task_info_file = task_dir / "task_info.json"
+            with open(task_info_file, "w") as f:
+                json.dump(tasks[task_id], f, default=str)
+            logger.info(f"Updated task status to 'ready_for_results'")
     except Exception as e:
-        logger.error(f"Failed to save initial designs to {designs_file} for task {task_id}: {e}", exc_info=True)
-        # Proceed even if saving fails, but log the error
-
+        logger.error(f"Failed to save designs for task {task_id}: {e}", exc_info=True)
+        # Continue despite save error - we can still return the generated designs
+    
     return schema.DesignResponse(designs=final_designs)
 
 

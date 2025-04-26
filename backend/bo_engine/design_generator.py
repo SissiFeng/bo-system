@@ -68,8 +68,24 @@ class DesignGenerator(ABC):
 
 class RandomDesignGenerator(DesignGenerator):
     """
-    Generate random design points by sampling from parameter distributions.
+    Generate design points using random sampling.
     """
+    def __init__(self, parameter_space: ParameterSpace, seed: Optional[int] = None):
+        """
+        Initialize a random design generator.
+        
+        Args:
+            parameter_space: Parameter space for generating designs
+            seed: Random seed for reproducibility
+        """
+        super().__init__(parameter_space)
+        self.seed = seed
+        self.rng = np.random.RandomState(seed)
+        
+        # Initialize constraint handler
+        from .utils import ConstraintHandler
+        self.constraint_handler = ConstraintHandler(parameter_space)
+    
     def generate(self, n: int) -> List[Dict[str, Any]]:
         """
         Generate n random design points.
@@ -80,12 +96,65 @@ class RandomDesignGenerator(DesignGenerator):
         Returns:
             List[Dict[str, Any]]: List of design points
         """
-        designs = self.parameter_space.sample_random_batch(n)
+        if n <= 0:
+            return []
         
-        # If we couldn't generate enough designs, warn
-        if len(designs) < n:
-            logger.warning(f"Could only generate {len(designs)} out of {n} requested design points")
+        # Use adaptive sampling with constraint handler if constraints exist
+        if self.parameter_space.has_constraints():
+            # Define a generator function for random sampling
+            def random_generator(num_points):
+                points = []
+                for _ in range(num_points):
+                    point = {}
+                    for param_name, param_config in self.parameter_space.parameters.items():
+                        param_type = param_config["type"]
+                        
+                        if param_type == "continuous":
+                            min_val = param_config["min"]
+                            max_val = param_config["max"]
+                            point[param_name] = float(self.rng.uniform(min_val, max_val))
+                        
+                        elif param_type == "integer":
+                            min_val = param_config["min"]
+                            max_val = param_config["max"]
+                            point[param_name] = int(self.rng.randint(min_val, max_val + 1))
+                        
+                        elif param_type == "categorical":
+                            categories = param_config["categories"]
+                            point[param_name] = self.rng.choice(categories)
+                    
+                    points.append(point)
+                return points
+            
+            # Use adaptive sampling to get valid points
+            logger.info(f"Using adaptive sampling to generate {n} random design points with constraints")
+            return self.constraint_handler.adaptive_sampling(n, random_generator)
         
+        # If no constraints, use simple random sampling
+        designs = []
+        for _ in range(n):
+            design = {}
+            
+            for param_name, param_config in self.parameter_space.parameters.items():
+                param_type = param_config["type"]
+                
+                if param_type == "continuous":
+                    min_val = param_config["min"]
+                    max_val = param_config["max"]
+                    design[param_name] = float(self.rng.uniform(min_val, max_val))
+                
+                elif param_type == "integer":
+                    min_val = param_config["min"]
+                    max_val = param_config["max"]
+                    design[param_name] = int(self.rng.randint(min_val, max_val + 1))
+                
+                elif param_type == "categorical":
+                    categories = param_config["categories"]
+                    design[param_name] = self.rng.choice(categories)
+            
+            designs.append(design)
+        
+        logger.info(f"Generated {len(designs)} random design points")
         return designs
 
 
@@ -93,22 +162,118 @@ class LatinHypercubeDesignGenerator(DesignGenerator):
     """
     Generate design points using Latin Hypercube Sampling (LHS).
     """
-    def __init__(self, parameter_space: ParameterSpace, seed: Optional[int] = None):
+    def __init__(
+        self, 
+        parameter_space: ParameterSpace, 
+        seed: Optional[int] = None,
+        strength: int = 1,
+        optimization: Optional[str] = None
+    ):
         """
         Initialize a Latin Hypercube design generator.
         
         Args:
             parameter_space: Parameter space for generating designs
             seed: Random seed for reproducibility
+            strength: Correlation control strength (1=no optimization, 2=stronger)
+            optimization: Optional optimization method:
+                         - "correlation": Minimize correlation between columns
+                         - "maximin": Maximize minimum distance between points
+                         - "centermaximin": Center points within cells and maximize min distance
+                         - None: No optimization
         """
         super().__init__(parameter_space)
         self.seed = seed
+        self.strength = strength
+        self.optimization = optimization
+        
+        # Initialize constraint handler
+        from .utils import ConstraintHandler
+        self.constraint_handler = ConstraintHandler(parameter_space)
+        
+        # Import scipy for better Latin Hypercube Sampling if available
+        try:
+            from scipy.stats import qmc
+            self.qmc = qmc
+            self.has_scipy_qmc = True
+        except ImportError:
+            self.has_scipy_qmc = False
         
         # Check if parameter space has any constraints
-        self.has_constraints = len(parameter_space.constraints) > 0
+        self.has_constraints = parameter_space.has_constraints()
         
         if self.has_constraints:
-            logger.warning("Parameter space has constraints. LHS designs may not satisfy all constraints.")
+            logger.info("Parameter space has constraints. Using advanced constraint handling.")
+    
+    def _generate_lhs_points_scipy(self, n, dim):
+        """
+        Generate Latin hypercube points using scipy's implementation
+        
+        Args:
+            n: Number of points
+            dim: Dimensionality
+            
+        Returns:
+            np.ndarray: LHS samples in [0,1] space
+        """
+        try:
+            # Use scipy's more advanced LHS implementation
+            sampler = self.qmc.LatinHypercube(
+                d=dim, 
+                strength=self.strength,
+                optimization=self.optimization,
+                seed=self.seed
+            )
+            samples = sampler.random(n)
+            
+            # Use a second optimization step if requested
+            if self.optimization == "correlation":
+                # Reduce correlation between parameters
+                self.qmc.discrepancy(samples, iterative=True, method="L2-centered")
+            elif self.optimization == "maximin":
+                # Try to maximize the minimum distance
+                try:
+                    from .utils import maximize_min_distance
+                    # Generate multiple candidate sets and pick the best one
+                    candidates = []
+                    for i in range(3):
+                        candidates.append(sampler.random(n))
+                    
+                    # Select the best candidate
+                    best_idx = 0
+                    best_min_dist = 0
+                    for i, candidate in enumerate(candidates):
+                        from scipy.spatial.distance import pdist
+                        min_dist = np.min(pdist(candidate))
+                        if min_dist > best_min_dist:
+                            best_min_dist = min_dist
+                            best_idx = i
+                    
+                    samples = candidates[best_idx]
+                except Exception as e:
+                    logger.warning(f"Maximin optimization failed: {e}")
+            
+            return samples
+            
+        except Exception as e:
+            logger.warning(f"Error using scipy's LHS implementation: {e}")
+            # Fall back to simple LHS implementation
+            from .utils import latin_hypercube_sampling
+            return latin_hypercube_sampling(n, dim, self.seed)
+    
+    def _generate_lhs_points_internal(self, n, dim):
+        """
+        Generate Latin hypercube points using internal implementation
+        
+        Args:
+            n: Number of points
+            dim: Dimensionality
+            
+        Returns:
+            np.ndarray: LHS samples in [0,1] space
+        """
+        from .utils import latin_hypercube_sampling
+        return latin_hypercube_sampling(n, dim, self.seed)
     
     def generate(self, n: int) -> List[Dict[str, Any]]:
         """
@@ -120,34 +285,53 @@ class LatinHypercubeDesignGenerator(DesignGenerator):
         Returns:
             List[Dict[str, Any]]: List of design points
         """
+        if n <= 0:
+            return []
+        
         # Get internal dimensionality
         dim = self.parameter_space.get_internal_dimensions()
         
-        # Generate LHS samples in [0, 1] space
-        samples = latin_hypercube_sampling(n, dim, seed=self.seed)
-        
-        # Convert samples to parameter space
-        designs = []
-        for i in range(n):
-            try:
-                # Convert internal representation to point
-                point = self.parameter_space.internal_to_point(samples[i])
-                
-                # Check if point satisfies constraints
-                if not self.has_constraints or self.parameter_space.is_valid_point(point):
-                    designs.append(point)
-            except Exception as e:
-                logger.warning(f"Error generating design point: {e}")
-        
-        # If we have constraints and couldn't generate enough designs, fill with random samples
-        if len(designs) < n:
-            logger.warning(f"LHS generated only {len(designs)} valid points out of {n}. Filling remainder with random samples.")
+        # Define LHS generator function for constraint handler
+        def lhs_generator(num_points):
+            # Generate LHS samples in [0, 1] space
+            if self.has_scipy_qmc:
+                samples = self._generate_lhs_points_scipy(num_points, dim)
+            else:
+                samples = self._generate_lhs_points_internal(num_points, dim)
             
-            # Generate additional random points
-            random_generator = RandomDesignGenerator(self.parameter_space)
-            additional_points = random_generator.generate(n - len(designs))
-            designs.extend(additional_points)
+            # Convert samples to parameter space
+            designs = []
+            for i in range(num_points):
+                try:
+                    # Convert internal representation to point
+                    point = self.parameter_space.internal_to_point(samples[i])
+                    designs.append(point)
+                except Exception as e:
+                    logger.warning(f"Error generating LHS design point: {e}")
+            
+            return designs
         
+        # Use constraint handler if constraints exist
+        if self.has_constraints:
+            logger.info(f"Using space-filling sampling to generate {n} LHS points with constraints")
+            # Use space-filling sampling for better distribution with constraints
+            return self.constraint_handler.space_filling_sampling(n, [], lhs_generator)
+        
+        # If no constraints, generate LHS points directly
+        designs = lhs_generator(n)
+        
+        # Evaluate design quality 
+        try:
+            if designs and len(designs) > 1:
+                from .utils import evaluate_lhs_quality
+                points_array = np.array([list(point.values()) for point in designs])
+                quality = evaluate_lhs_quality(points_array)
+                logger.info(f"LHS design quality: min distance = {quality['min_distance']:.4f}, "
+                           f"uniformity (CV) = {quality['cv']:.4f}")
+        except Exception as e:
+            logger.debug(f"Could not evaluate LHS quality: {e}")
+        
+        logger.info(f"Generated {len(designs)} LHS design points")
         return designs
 
 
@@ -155,8 +339,17 @@ class FactorialDesignGenerator(DesignGenerator):
     """
     Generate design points using factorial design.
     Only practical for small parameter spaces with discrete/categorical parameters.
+    Includes options for layered processing to handle larger parameter spaces.
     """
-    def __init__(self, parameter_space: ParameterSpace, levels: Dict[str, int] = None):
+    def __init__(
+        self, 
+        parameter_space: ParameterSpace, 
+        levels: Dict[str, int] = None,
+        max_combinations: int = 10000,
+        adaptive_sampling: bool = False,
+        parameter_groups: List[List[str]] = None,
+        importance_based: bool = False
+    ):
         """
         Initialize a factorial design generator.
         
@@ -165,73 +358,278 @@ class FactorialDesignGenerator(DesignGenerator):
             levels: Dictionary mapping parameter names to number of levels
                    For categorical parameters, this is ignored and all levels are used.
                    For continuous/discrete parameters, this controls sampling resolution.
+            max_combinations: Maximum number of combinations to generate before using layered approach
+            adaptive_sampling: If True, use adaptive sampling for high-dimensional spaces
+            parameter_groups: List of parameter groups to process in layers
+                             If None, parameters will be automatically grouped if needed
+            importance_based: If True, use parameter importance to determine sampling priority
         """
         super().__init__(parameter_space)
         self.levels = levels or {}
+        self.max_combinations = max_combinations
+        self.adaptive_sampling = adaptive_sampling
+        self.parameter_groups = parameter_groups
+        self.importance_based = importance_based
         
         # Check if parameter space is too large for factorial design
-        self._validate_parameter_space()
+        self.total_combinations = self._validate_parameter_space()
+        self.layered_approach = self.total_combinations > self.max_combinations
+        
+        # Automatically compute parameter groups if needed and not provided
+        if self.layered_approach and not self.parameter_groups:
+            self._compute_parameter_groups()
     
     def _validate_parameter_space(self):
         """
         Validate that parameter space is suitable for factorial design.
+        
+        Returns:
+            int: Total number of combinations
         """
         total_combinations = 1
+        self.parameter_level_counts = {}
         
-        for param in self.parameter_space.parameters:
-            if param.type.value == "categorical":
-                level_count = len(param.values)
-            elif param.name in self.levels:
-                level_count = self.levels[param.name]
+        for param_name, param_config in self.parameter_space.parameters.items():
+            param_type = param_config["type"]
+            
+            if param_type == "categorical":
+                level_count = len(param_config["categories"])
+            elif param_name in self.levels:
+                level_count = self.levels[param_name]
             else:
                 # Default levels - 5 for continuous, min(10, all values) for discrete
-                if param.type.value == "discrete":
-                    level_count = min(10, (param.max - param.min) // param.step + 1)
+                if param_type == "integer":
+                    # For discrete integer parameters
+                    min_val = param_config["min"]
+                    max_val = param_config["max"]
+                    level_count = min(10, max_val - min_val + 1)
                 else:
                     level_count = 5
             
+            self.parameter_level_counts[param_name] = level_count
             total_combinations *= level_count
         
-        if total_combinations > 10000:
-            logger.warning(f"Factorial design will generate {total_combinations} points, which may be excessive.")
+        if total_combinations > self.max_combinations:
+            logger.warning(f"Factorial design would generate {total_combinations} points, "
+                          f"which exceeds the maximum of {self.max_combinations}. "
+                          f"Using layered approach instead.")
         
         return total_combinations
     
-    def _get_parameter_levels(self, param, level_count):
+    def _compute_parameter_groups(self):
+        """
+        Compute parameter groups for layered approach.
+        This splits parameters into groups that can be processed separately.
+        """
+        # Sort parameters by importance if specified, otherwise by number of levels
+        if self.importance_based:
+            # Try to get importance from parameter metadata
+            params_with_importance = []
+            for param_name, param_config in self.parameter_space.parameters.items():
+                importance = param_config.get("importance", 1.0)
+                params_with_importance.append((param_name, importance))
+            
+            # Sort by importance (higher first)
+            sorted_params = [p[0] for p in sorted(params_with_importance, 
+                                                 key=lambda x: x[1], 
+                                                 reverse=True)]
+        else:
+            # Sort by level count (fewer levels first to minimize combinations)
+            sorted_params = [p[0] for p in sorted(self.parameter_level_counts.items(), 
+                                                key=lambda x: x[1])]
+        
+        # Create groups with manageable combination counts
+        groups = []
+        current_group = []
+        current_combinations = 1
+        
+        for param_name in sorted_params:
+            level_count = self.parameter_level_counts[param_name]
+            new_combinations = current_combinations * level_count
+            
+            if new_combinations <= self.max_combinations:
+                current_group.append(param_name)
+                current_combinations = new_combinations
+            else:
+                if current_group:  # Only add non-empty groups
+                    groups.append(current_group)
+                current_group = [param_name]
+                current_combinations = level_count
+        
+        if current_group:  # Add the last group if not empty
+            groups.append(current_group)
+        
+        self.parameter_groups = groups
+        logger.info(f"Created {len(groups)} parameter groups for layered factorial design")
+        for i, group in enumerate(groups):
+            logger.debug(f"Group {i+1}: {group}")
+    
+    def _get_parameter_levels(self, param_name, param_config, level_count):
         """
         Get specific levels for a parameter based on its type.
         
         Args:
-            param: Parameter to get levels for
+            param_name: Name of the parameter
+            param_config: Parameter configuration dictionary
             level_count: Number of levels to generate
             
         Returns:
             List: List of parameter values at specified levels
         """
-        if param.type.value == "categorical":
-            return param.values
+        param_type = param_config["type"]
         
-        if param.type.value == "discrete":
+        if param_type == "categorical":
+            return param_config["categories"]
+        
+        if param_type == "integer":
+            # For discrete integer parameters
+            min_val = param_config["min"]
+            max_val = param_config["max"]
+            
             # For discrete, use as many levels as possible up to level_count
-            all_values = param.get_values()
-            if len(all_values) <= level_count:
-                return all_values
+            if max_val - min_val + 1 <= level_count:
+                return list(range(min_val, max_val + 1))
             
             # Select evenly spaced values
-            indices = np.linspace(0, len(all_values) - 1, level_count, dtype=int)
-            return [all_values[i] for i in indices]
+            indices = np.linspace(min_val, max_val, level_count, dtype=int)
+            return sorted(set(indices.tolist()))  # Remove duplicates if any
         
         # For continuous, use evenly spaced values within range
-        return np.linspace(param.min, param.max, level_count).tolist()
+        min_val = param_config["min"]
+        max_val = param_config["max"]
+        return np.linspace(min_val, max_val, level_count).tolist()
+    
+    def _generate_for_group(self, param_group, n=None):
+        """
+        Generate factorial design points for a specific parameter group.
+        
+        Args:
+            param_group: List of parameter names to include
+            n: Optional limit on number of points to generate
+            
+        Returns:
+            List[Dict[str, Any]]: List of design points for this group
+        """
+        # Start with an empty design point
+        design_points = [{}]
+        
+        # For each parameter in the group, expand the design
+        for param_name in param_group:
+            param_config = self.parameter_space.parameters[param_name]
+            
+            # Determine number of levels for this parameter
+            if param_config["type"] == "categorical":
+                level_count = len(param_config["categories"])
+            elif param_name in self.levels:
+                level_count = self.levels[param_name]
+            else:
+                # Default levels - 5 for continuous, min(10, all values) for discrete
+                if param_config["type"] == "integer":
+                    min_val = param_config["min"]
+                    max_val = param_config["max"]
+                    level_count = min(10, max_val - min_val + 1)
+                else:
+                    level_count = 5
+            
+            # Get specific levels
+            levels = self._get_parameter_levels(param_name, param_config, level_count)
+            
+            # Create new expanded design
+            new_design_points = []
+            for point in design_points:
+                for level in levels:
+                    new_point = point.copy()
+                    new_point[param_name] = level
+                    new_design_points.append(new_point)
+            
+            design_points = new_design_points
+            
+            # Early stopping if we already have enough points
+            if n is not None and len(design_points) >= n:
+                # Randomly sample to exactly n points
+                design_points = random.sample(design_points, n)
+                break
+        
+        return design_points
+    
+    def _merge_design_groups(self, group_designs, n=None):
+        """
+        Merge design points from different parameter groups.
+        
+        Args:
+            group_designs: List of design point lists for each group
+            n: Optional limit on final number of points
+            
+        Returns:
+            List[Dict[str, Any]]: Merged design points
+        """
+        if not group_designs:
+            return []
+        
+        # Start with the first group's designs
+        merged_designs = group_designs[0]
+        
+        # Merge with each additional group
+        for designs in group_designs[1:]:
+            if not merged_designs or not designs:
+                continue
+                
+            # If designs are too many, sample from both groups
+            if n is not None and len(merged_designs) * len(designs) > n:
+                # Use Cartesian product with sampling
+                n_samples = min(n, len(merged_designs) * len(designs))
+                
+                # Determine sample indices for Cartesian product
+                all_indices = [(i, j) for i in range(len(merged_designs)) for j in range(len(designs))]
+                selected_indices = random.sample(all_indices, n_samples)
+                
+                new_designs = []
+                for i, j in selected_indices:
+                    new_point = {**merged_designs[i], **designs[j]}
+                    new_designs.append(new_point)
+                
+                merged_designs = new_designs
+            else:
+                # Use full Cartesian product
+                new_designs = []
+                for d1 in merged_designs:
+                    for d2 in designs:
+                        new_point = {**d1, **d2}
+                        new_designs.append(new_point)
+                
+                merged_designs = new_designs
+                
+                # Limit if we now have too many designs
+                if n is not None and len(merged_designs) > n:
+                    merged_designs = random.sample(merged_designs, n)
+        
+        return merged_designs
     
     def generate(self, n: int = None) -> List[Dict[str, Any]]:
         """
         Generate design points using factorial design.
-        Note: For factorial design, the number of points is determined by the levels
-        and n is ignored. It's only kept for API consistency.
+        For large parameter spaces, uses a layered approach to avoid combinatorial explosion.
         
         Args:
-            n: Ignored for factorial design
+            n: Desired number of design points. If None, generates all combinations,
+               but with layered approach for very large spaces.
+            
+        Returns:
+            List[Dict[str, Any]]: List of design points
+        """
+        # For small parameter spaces, use traditional full factorial design
+        if not self.layered_approach:
+            return self._generate_traditional_factorial(n)
+        
+        # For large parameter spaces, use layered approach
+        return self._generate_layered_factorial(n)
+    
+    def _generate_traditional_factorial(self, n: int = None) -> List[Dict[str, Any]]:
+        """
+        Generate design points using traditional full factorial design.
+        
+        Args:
+            n: Number of design points to generate (optional)
             
         Returns:
             List[Dict[str, Any]]: List of design points
@@ -240,34 +638,36 @@ class FactorialDesignGenerator(DesignGenerator):
         design_points = [{}]
         
         # For each parameter, expand the design
-        for param in self.parameter_space.parameters:
+        for param_name, param_config in self.parameter_space.parameters.items():
             # Determine number of levels for this parameter
-            if param.type.value == "categorical":
-                level_count = len(param.values)
-            elif param.name in self.levels:
-                level_count = self.levels[param.name]
+            if param_config["type"] == "categorical":
+                level_count = len(param_config["categories"])
+            elif param_name in self.levels:
+                level_count = self.levels[param_name]
             else:
                 # Default levels - 5 for continuous, min(10, all values) for discrete
-                if param.type.value == "discrete":
-                    level_count = min(10, (param.max - param.min) // param.step + 1)
+                if param_config["type"] == "integer":
+                    min_val = param_config["min"]
+                    max_val = param_config["max"]
+                    level_count = min(10, max_val - min_val + 1)
                 else:
                     level_count = 5
             
             # Get specific levels
-            levels = self._get_parameter_levels(param, level_count)
+            levels = self._get_parameter_levels(param_name, param_config, level_count)
             
             # Create new expanded design
             new_design_points = []
             for point in design_points:
                 for level in levels:
                     new_point = point.copy()
-                    new_point[param.name] = level
+                    new_point[param_name] = level
                     new_design_points.append(new_point)
             
             design_points = new_design_points
         
         # Filter out points that don't satisfy constraints
-        if self.parameter_space.constraints:
+        if self.parameter_space.has_constraints():
             valid_points = []
             for point in design_points:
                 if self.parameter_space.is_valid_point(point):
@@ -280,39 +680,106 @@ class FactorialDesignGenerator(DesignGenerator):
         
         logger.info(f"Generated {len(design_points)} factorial design points")
         return design_points
+    
+    def _generate_layered_factorial(self, n: int = None) -> List[Dict[str, Any]]:
+        """
+        Generate design points using layered factorial design for large parameter spaces.
+        
+        Args:
+            n: Number of design points to generate
+            
+        Returns:
+            List[Dict[str, Any]]: List of design points
+        """
+        # If n is not specified, use a reasonable default
+        if n is None:
+            n = min(self.max_combinations, 100)
+            logger.info(f"No sample size specified for large parameter space. Using default n={n}")
+        
+        # Calculate points to generate per group
+        points_per_group = max(int(n ** (1/len(self.parameter_groups))), 2)
+        logger.info(f"Using layered approach with {len(self.parameter_groups)} groups, "
+                   f"generating ~{points_per_group} points per group")
+        
+        # Generate designs for each parameter group
+        group_designs = []
+        for group in self.parameter_groups:
+            group_design = self._generate_for_group(group, points_per_group)
+            group_designs.append(group_design)
+        
+        # Merge designs from all groups
+        merged_designs = self._merge_design_groups(group_designs, n)
+        
+        # Filter out points that don't satisfy constraints
+        if self.parameter_space.has_constraints():
+            valid_points = []
+            for point in merged_designs:
+                if self.parameter_space.is_valid_point(point):
+                    valid_points.append(point)
+            
+            # If we lost too many points due to constraints, generate more
+            if len(valid_points) < n * 0.5 and len(valid_points) < len(merged_designs) * 0.5:
+                logger.warning(f"Only {len(valid_points)} out of {len(merged_designs)} points "
+                              f"satisfy constraints. Generating additional points.")
+                
+                # Try to generate more points with higher sampling rate
+                additional_needed = n - len(valid_points)
+                if additional_needed > 0:
+                    # Use random sampling as fallback to meet the requested number
+                    random_generator = RandomDesignGenerator(self.parameter_space)
+                    random_points = random_generator.generate(additional_needed)
+                    valid_points.extend(random_points)
+            
+            merged_designs = valid_points
+        
+        # If we still need to limit the number of points
+        if n is not None and len(merged_designs) > n:
+            merged_designs = random.sample(merged_designs, n)
+        
+        logger.info(f"Generated {len(merged_designs)} layered factorial design points")
+        return merged_designs
 
 
 class SobolDesignGenerator(DesignGenerator):
     """
     Generate design points using Sobol sequences.
-    Requires scikit-learn or scipy for Sobol sequence generation.
+    Requires scipy for optimal Sobol sequence generation.
     """
-    def __init__(self, parameter_space: ParameterSpace, seed: Optional[int] = None):
+    def __init__(
+        self, 
+        parameter_space: ParameterSpace, 
+        seed: Optional[int] = None,
+        scramble: bool = True,
+        bits: Optional[int] = None,
+        optimization: Optional[str] = None
+    ):
         """
         Initialize a Sobol sequence design generator.
         
         Args:
             parameter_space: Parameter space for generating designs
             seed: Random seed for reproducibility
+            scramble: Whether to use scrambling (default: True). Scrambling makes the sequence
+                     suitable for singular integrands and can improve convergence rate.
+            bits: Number of bits for the Sobol sequence generator (max value 64). 
+                  Controls maximum number of points (2**bits). Default (None) uses scipy's default.
+            optimization: Optional optimization scheme to improve quality after sampling:
+                         - "random-cd": Random permutations to lower centered discrepancy
+                         - "lloyd": Perturb samples using modified Lloyd-Max algorithm
+                         - None: No optimization
         """
         super().__init__(parameter_space)
         self.seed = seed
+        self.scramble = scramble
+        self.bits = bits
+        self.optimization = optimization
         
-        # Check if required libraries are available
+        # Check if scipy is available
         try:
             from scipy.stats import qmc
             self.qmc = qmc
         except ImportError:
-            try:
-                from sklearn.experimental import enable_halton_sequences_
-                from sklearn.preprocessing import QuantileTransformer
-                self.sklearn_available = True
-            except ImportError:
-                raise ImportError("Either scipy or scikit-learn is required for Sobol sequence generation")
-            
-            self.sklearn_available = True
-        else:
-            self.sklearn_available = False
+            raise ImportError("scipy is required for Sobol sequence generation")
         
         # Check if parameter space has any constraints
         self.has_constraints = len(parameter_space.constraints) > 0
@@ -333,25 +800,54 @@ class SobolDesignGenerator(DesignGenerator):
         # Get internal dimensionality
         dim = self.parameter_space.get_internal_dimensions()
         
-        # Generate Sobol samples in [0, 1] space
-        if not self.sklearn_available:
-            # Use scipy's implementation
-            sampler = self.qmc.Sobol(d=dim, seed=self.seed)
-            samples = sampler.random(n)
-        else:
-            # Fallback to less ideal method using sklearn
-            import numpy as np
-            from sklearn.preprocessing import QuantileTransformer
-            
-            # Generate random samples and transform to uniform distribution
-            rng = np.random.RandomState(self.seed)
-            X = rng.normal(size=(n, dim))
-            
-            qt = QuantileTransformer(output_distribution='uniform', random_state=self.seed)
-            samples = qt.fit_transform(X)
+        # Create Sobol generator
+        try:
+            # Use modern scipy.stats.qmc API with rng parameter
+            sampler = self.qmc.Sobol(
+                d=dim, 
+                scramble=self.scramble, 
+                bits=self.bits,
+                rng=self.seed,
+                optimization=self.optimization
+            )
+        except TypeError:
+            # Fallback for older scipy versions using seed parameter
+            try:
+                sampler = self.qmc.Sobol(
+                    d=dim, 
+                    scramble=self.scramble,
+                    seed=self.seed
+                )
+            except Exception as e:
+                logger.error(f"Failed to create Sobol generator: {e}")
+                raise
+        
+        # Determine how many points to generate 
+        # (Sobol sequences work best with powers of 2)
+        if n <= 0:
+            return []
+        
+        # For best quality, use random_base2 when n is a power of 2
+        is_power_of_two = (n & (n-1) == 0) and n != 0
+        
+        try:
+            if is_power_of_two:
+                # Calculate m such that 2^m = n
+                m = n.bit_length() - 1
+                logger.info(f"Using random_base2 with m={m} to generate {n} Sobol points")
+                samples = sampler.random_base2(m=m)
+            else:
+                logger.info(f"Using random to generate {n} Sobol points")
+                # For non-power-of-2 sizes, can still use regular random method
+                samples = sampler.random(n=n)
+        except Exception as e:
+            logger.error(f"Error generating Sobol samples: {e}")
+            raise
         
         # Convert samples to parameter space
         designs = []
+        valid_count = 0
+        
         for i in range(n):
             try:
                 # Convert internal representation to point
@@ -360,18 +856,57 @@ class SobolDesignGenerator(DesignGenerator):
                 # Check if point satisfies constraints
                 if not self.has_constraints or self.parameter_space.is_valid_point(point):
                     designs.append(point)
+                    valid_count += 1
             except Exception as e:
                 logger.warning(f"Error generating design point: {e}")
         
-        # If we have constraints and couldn't generate enough designs, fill with random samples
-        if len(designs) < n:
-            logger.warning(f"Sobol generated only {len(designs)} valid points out of {n}. Filling remainder with random samples.")
+        # If we have constraints and couldn't generate enough designs, fill with smart sampling
+        if valid_count < n:
+            logger.warning(f"Sobol generated only {valid_count} valid points out of {n}. Using adaptive sampling to fill remainder.")
             
-            # Generate additional random points
-            random_generator = RandomDesignGenerator(self.parameter_space)
-            additional_points = random_generator.generate(n - len(designs))
-            designs.extend(additional_points)
+            # Calculate how many more points we need
+            remaining = n - valid_count
+            
+            # Generate oversampled additional points to increase chances of finding valid ones
+            # Use 3x oversampling as a heuristic
+            oversampling_factor = 3
+            additional_samples = sampler.random(n=remaining * oversampling_factor)
+            
+            additional_valid_points = []
+            for i in range(len(additional_samples)):
+                try:
+                    point = self.parameter_space.internal_to_point(additional_samples[i])
+                    if self.parameter_space.is_valid_point(point):
+                        additional_valid_points.append(point)
+                        if len(additional_valid_points) >= remaining:
+                            break
+                except Exception as e:
+                    continue
+            
+            # If we still don't have enough valid points, use RandomDesignGenerator as fallback
+            if len(additional_valid_points) < remaining:
+                logger.warning(f"Still missing {remaining - len(additional_valid_points)} valid points. Using random sampling as fallback.")
+                random_generator = RandomDesignGenerator(self.parameter_space)
+                random_points = random_generator.generate(remaining - len(additional_valid_points))
+                additional_valid_points.extend(random_points)
+            
+            # Add the additional valid points to our design
+            designs.extend(additional_valid_points[:remaining])
         
+        # Calculate space-filling quality metric if we have the scipy.spatial package
+        if valid_count > 1:
+            try:
+                import numpy as np
+                from scipy.spatial import distance
+                points_array = np.array([list(point.values()) for point in designs])
+                if points_array.shape[1] > 1:  # Only meaningful for multi-dimensional spaces
+                    min_dist = np.min(distance.pdist(points_array))
+                    mean_dist = np.mean(distance.pdist(points_array))
+                    logger.info(f"Sobol design quality: min distance between points = {min_dist:.4f}, mean distance = {mean_dist:.4f}")
+            except (ImportError, Exception) as e:
+                pass  # Skip quality calculation if not available
+        
+        logger.info(f"Generated {len(designs)} Sobol design points")
         return designs
 
 
@@ -440,24 +975,61 @@ def create_design_generator(
         parameter_space: Parameter space for generating designs
         design_type: Type of design generator to create
         **kwargs: Additional parameters for specific design generators
+            - For RANDOM: seed (optional)
+            - For LATIN_HYPERCUBE: seed (optional), strength (default 1),
+                                  optimization (default None, options: "correlation", "maximin", "centermaximin")
+            - For FACTORIAL: levels (optional), max_combinations (default 10000),
+                           adaptive_sampling (default False), parameter_groups (optional),
+                           importance_based (default False)
+            - For SOBOL: seed (optional), scramble (default True), bits (optional),
+                        optimization (optional)
+            - For CUSTOM: design_points (required)
     
     Returns:
         DesignGenerator: Design generator instance
     """
     if design_type == DesignType.RANDOM:
-        return RandomDesignGenerator(parameter_space)
+        seed = kwargs.get("seed")
+        return RandomDesignGenerator(parameter_space, seed=seed)
     
     elif design_type == DesignType.LATIN_HYPERCUBE:
         seed = kwargs.get("seed")
-        return LatinHypercubeDesignGenerator(parameter_space, seed=seed)
+        strength = kwargs.get("strength", 1)
+        optimization = kwargs.get("optimization")
+        return LatinHypercubeDesignGenerator(
+            parameter_space, 
+            seed=seed,
+            strength=strength,
+            optimization=optimization
+        )
     
     elif design_type == DesignType.FACTORIAL:
         levels = kwargs.get("levels")
-        return FactorialDesignGenerator(parameter_space, levels=levels)
+        max_combinations = kwargs.get("max_combinations", 10000)
+        adaptive_sampling = kwargs.get("adaptive_sampling", False)
+        parameter_groups = kwargs.get("parameter_groups")
+        importance_based = kwargs.get("importance_based", False)
+        return FactorialDesignGenerator(
+            parameter_space, 
+            levels=levels,
+            max_combinations=max_combinations,
+            adaptive_sampling=adaptive_sampling,
+            parameter_groups=parameter_groups,
+            importance_based=importance_based
+        )
     
     elif design_type == DesignType.SOBOL:
         seed = kwargs.get("seed")
-        return SobolDesignGenerator(parameter_space, seed=seed)
+        scramble = kwargs.get("scramble", True)
+        bits = kwargs.get("bits")
+        optimization = kwargs.get("optimization")
+        return SobolDesignGenerator(
+            parameter_space, 
+            seed=seed, 
+            scramble=scramble,
+            bits=bits,
+            optimization=optimization
+        )
     
     elif design_type == DesignType.CUSTOM:
         design_points = kwargs.get("design_points")

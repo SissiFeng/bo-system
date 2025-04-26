@@ -512,4 +512,434 @@ def results_to_dataframe(results: List[Dict]) -> pd.DataFrame:
         
         rows.append(row)
     
-    return pd.DataFrame(rows) 
+    return pd.DataFrame(rows)
+
+
+class ConstraintHandler:
+    """
+    高级约束处理工具类，提供约束分析和智能采样功能。
+    """
+    
+    def __init__(self, parameter_space):
+        """
+        初始化约束处理器
+        
+        Args:
+            parameter_space: 参数空间对象
+        """
+        self.parameter_space = parameter_space
+        self.has_constraints = parameter_space.has_constraints()
+        
+        # 初始化约束分析缓存
+        self.constraint_cache = {
+            'valid_regions': None,
+            'violation_count': {},
+            'feasible_rate': None,
+            'analyzed_points': 0
+        }
+        
+        if self.has_constraints:
+            logger.info(f"初始化约束处理器，参数空间具有约束条件")
+        
+    def analyze_constraints(self, sample_points=1000, force=False):
+        """
+        分析约束条件，评估可行区域特性
+        
+        Args:
+            sample_points: 用于分析的采样点数量
+            force: 强制重新分析，即使已有缓存结果
+            
+        Returns:
+            Dict: 约束分析结果
+        """
+        if not self.has_constraints:
+            return {'feasible_rate': 1.0, 'has_constraints': False}
+        
+        # 如果已有分析结果且不强制重新分析
+        if not force and self.constraint_cache['feasible_rate'] is not None:
+            return {
+                'feasible_rate': self.constraint_cache['feasible_rate'],
+                'has_constraints': True,
+                'analyzed_points': self.constraint_cache['analyzed_points']
+            }
+        
+        # 生成随机采样点进行分析
+        try:
+            import numpy as np
+            
+            # 生成均匀分布的随机点
+            valid_count = 0
+            violation_counts = {}
+            
+            # 使用拉丁超立方抽样生成更均匀的点
+            try:
+                dim = self.parameter_space.get_internal_dimensions()
+                # 使用参数空间中的latin_hypercube_sampling函数
+                samples = latin_hypercube_sampling(sample_points, dim)
+                
+                for i in range(sample_points):
+                    try:
+                        # 将内部表示转换为实际点
+                        point = self.parameter_space.internal_to_point(samples[i])
+                        
+                        # 检查约束条件
+                        is_valid, violations = self._check_constraint_details(point)
+                        
+                        if is_valid:
+                            valid_count += 1
+                        else:
+                            # 记录违反的约束
+                            for v in violations:
+                                if v not in violation_counts:
+                                    violation_counts[v] = 0
+                                violation_counts[v] += 1
+                    except Exception as e:
+                        logger.debug(f"分析约束时生成点出错: {e}")
+                        continue
+                
+            except Exception as e:
+                logger.warning(f"使用拉丁超立方抽样分析约束失败: {e}，回退到随机采样")
+                
+                # 回退到简单随机采样
+                for _ in range(sample_points):
+                    try:
+                        # 随机生成一个点
+                        point = {}
+                        for param_name, param_config in self.parameter_space.parameters.items():
+                            param_type = param_config["type"]
+                            
+                            if param_type == "continuous":
+                                min_val = param_config["min"]
+                                max_val = param_config["max"]
+                                point[param_name] = np.random.uniform(min_val, max_val)
+                            
+                            elif param_type == "integer":
+                                min_val = param_config["min"]
+                                max_val = param_config["max"]
+                                point[param_name] = np.random.randint(min_val, max_val + 1)
+                            
+                            elif param_type == "categorical":
+                                categories = param_config["categories"]
+                                point[param_name] = np.random.choice(categories)
+                        
+                        # 检查约束条件
+                        is_valid, violations = self._check_constraint_details(point)
+                        
+                        if is_valid:
+                            valid_count += 1
+                        else:
+                            # 记录违反的约束
+                            for v in violations:
+                                if v not in violation_counts:
+                                    violation_counts[v] = 0
+                                violation_counts[v] += 1
+                    except Exception as e:
+                        logger.debug(f"分析约束时生成随机点出错: {e}")
+                        continue
+            
+            # 计算可行率和记录分析结果
+            feasible_rate = valid_count / sample_points if sample_points > 0 else 0
+            
+            # 更新缓存
+            self.constraint_cache.update({
+                'feasible_rate': feasible_rate,
+                'violation_count': violation_counts,
+                'analyzed_points': sample_points
+            })
+            
+            logger.info(f"约束分析结果: 可行率 {feasible_rate:.3f}, 分析了 {sample_points} 个点")
+            if violation_counts:
+                logger.debug(f"约束违反计数: {violation_counts}")
+            
+            return {
+                'feasible_rate': feasible_rate,
+                'violation_counts': violation_counts,
+                'has_constraints': True,
+                'analyzed_points': sample_points
+            }
+            
+        except Exception as e:
+            logger.error(f"分析约束时出错: {e}")
+            return {'feasible_rate': None, 'has_constraints': True, 'error': str(e)}
+    
+    def _check_constraint_details(self, point):
+        """
+        检查点是否满足约束，并返回违反的约束详情
+        
+        Args:
+            point: 要检查的点
+            
+        Returns:
+            Tuple[bool, List[str]]: (是否满足约束, 违反的约束列表)
+        """
+        if not self.has_constraints:
+            return True, []
+        
+        violations = []
+        is_valid = True
+        
+        # 检查每个约束条件
+        for i, constraint in enumerate(self.parameter_space.constraints):
+            constraint_id = f"constraint_{i}"
+            if hasattr(constraint, 'description') and constraint['description']:
+                constraint_id = constraint['description']
+            
+            constraint_satisfied = False
+            try:
+                # 使用参数空间的constraint_type和check_constraints方法
+                constraint_satisfied = self.parameter_space.check_constraints(point)
+                if not constraint_satisfied:
+                    violations.append(constraint_id)
+                    is_valid = False
+            except Exception as e:
+                logger.debug(f"检查约束 {constraint_id} 时出错: {e}")
+                violations.append(f"{constraint_id}(error)")
+                is_valid = False
+        
+        return is_valid, violations
+    
+    def filter_valid_points(self, points):
+        """
+        过滤出满足所有约束的有效点
+        
+        Args:
+            points: 设计点列表
+            
+        Returns:
+            List: 有效设计点列表
+        """
+        if not self.has_constraints:
+            return points
+        
+        valid_points = []
+        for point in points:
+            if self.parameter_space.is_valid_point(point):
+                valid_points.append(point)
+        
+        return valid_points
+    
+    def adaptive_sampling(self, n_points, generator_func, max_attempts=3, batch_size=None):
+        """
+        使用自适应采样策略生成满足约束的点
+        
+        Args:
+            n_points: 需要的点数量
+            generator_func: 生成候选点的函数，接受n参数
+            max_attempts: 最大尝试次数
+            batch_size: 每批生成的点数量，默认为n_points的2倍
+            
+        Returns:
+            List: 生成的有效设计点列表
+        """
+        if not self.has_constraints:
+            # 如果没有约束，直接使用生成器函数
+            return generator_func(n_points)
+        
+        # 分析约束
+        constraint_analysis = self.analyze_constraints()
+        feasible_rate = constraint_analysis.get('feasible_rate', 0.1)
+        
+        # 确保可行率在有效范围内
+        feasible_rate = max(0.01, min(1.0, feasible_rate))
+        
+        # 根据可行率确定过采样因子
+        if feasible_rate > 0.8:
+            oversampling_factor = 1.5
+        elif feasible_rate > 0.5:
+            oversampling_factor = 2
+        elif feasible_rate > 0.2:
+            oversampling_factor = 3
+        elif feasible_rate > 0.05:
+            oversampling_factor = 5
+        else:
+            oversampling_factor = 10
+        
+        # 确定批处理大小
+        if batch_size is None:
+            batch_size = min(n_points * 2, 1000)
+        
+        valid_points = []
+        attempts = 0
+        total_generated = 0
+        
+        while len(valid_points) < n_points and attempts < max_attempts:
+            # 计算本轮需要生成的点数量
+            remaining = n_points - len(valid_points)
+            points_to_generate = int(remaining * oversampling_factor)
+            
+            # 限制单次生成点数，避免内存问题
+            points_to_generate = min(points_to_generate, batch_size)
+            
+            # 生成候选点
+            candidate_points = generator_func(points_to_generate)
+            total_generated += len(candidate_points)
+            
+            # 过滤有效点
+            for point in candidate_points:
+                if self.parameter_space.is_valid_point(point):
+                    valid_points.append(point)
+                    if len(valid_points) >= n_points:
+                        break
+            
+            # 更新可行率估计并调整过采样因子
+            if points_to_generate > 0:
+                current_feasible_rate = len(valid_points) / total_generated
+                # 平滑更新可行率估计
+                feasible_rate = 0.7 * feasible_rate + 0.3 * current_feasible_rate
+                
+                # 根据新的可行率调整过采样因子
+                if feasible_rate > 0.8:
+                    oversampling_factor = 1.5
+                elif feasible_rate > 0.5:
+                    oversampling_factor = 2
+                elif feasible_rate > 0.2:
+                    oversampling_factor = 3
+                elif feasible_rate > 0.05:
+                    oversampling_factor = 5
+                else:
+                    oversampling_factor = 10
+            
+            attempts += 1
+        
+        # 如果收集到的有效点不足，记录警告
+        if len(valid_points) < n_points:
+            logger.warning(f"自适应采样未能生成足够的有效点: 请求 {n_points}，生成 {len(valid_points)}")
+        
+        return valid_points[:n_points]
+    
+    def space_filling_sampling(self, n_points, initial_points, generator_func):
+        """
+        生成空间填充的采样点，尽量分散在可行域中
+        
+        Args:
+            n_points: 需要的点数量
+            initial_points: 初始点集合
+            generator_func: 生成候选点的函数，接受n参数
+            
+        Returns:
+            List: 生成的设计点列表
+        """
+        if not self.has_constraints:
+            # 如果没有约束，直接使用生成器函数
+            return generator_func(n_points)
+        
+        # 如果初始点集合为空，使用自适应采样生成初始点
+        if not initial_points:
+            initial_points = self.adaptive_sampling(min(n_points, 10), generator_func)
+        
+        valid_points = list(initial_points)
+        
+        # 如果已有足够的点，直接返回
+        if len(valid_points) >= n_points:
+            return valid_points[:n_points]
+        
+        try:
+            import numpy as np
+            from scipy.spatial import distance
+            
+            # 生成候选点
+            oversampling_factor = 5
+            candidate_points = self.adaptive_sampling(
+                (n_points - len(valid_points)) * oversampling_factor, 
+                generator_func
+            )
+            
+            # 如果没有足够的候选点，直接返回所有有效点
+            if not candidate_points:
+                return valid_points
+            
+            # 将现有点和候选点转换为数组形式进行距离计算
+            existing_array = np.array([list(point.values()) for point in valid_points])
+            candidate_array = np.array([list(point.values()) for point in candidate_points])
+            
+            # 逐个选择最优点
+            while len(valid_points) < n_points and candidate_points:
+                # 计算每个候选点到现有点集的最小距离
+                min_distances = []
+                
+                for i in range(len(candidate_array)):
+                    # 计算候选点到所有现有点的距离
+                    if len(existing_array) > 0:
+                        dists = distance.cdist([candidate_array[i]], existing_array, 'euclidean')[0]
+                        min_dist = np.min(dists)
+                    else:
+                        # 如果没有现有点，设定一个较大的初始距离
+                        min_dist = float('inf')
+                    
+                    min_distances.append(min_dist)
+                
+                # 选择最大化最小距离的点
+                if min_distances:
+                    best_idx = np.argmax(min_distances)
+                    
+                    # 添加最佳点到结果集
+                    valid_points.append(candidate_points[best_idx])
+                    
+                    # 更新现有点数组
+                    existing_array = np.vstack([existing_array, [candidate_array[best_idx]]])
+                    
+                    # 从候选点中删除已选点
+                    candidate_points.pop(best_idx)
+                    candidate_array = np.delete(candidate_array, best_idx, axis=0)
+                else:
+                    break
+                
+            return valid_points[:n_points]
+            
+        except Exception as e:
+            logger.warning(f"空间填充采样失败: {e}，回退到自适应采样")
+            # 回退到自适应采样
+            additional_points = self.adaptive_sampling(
+                n_points - len(valid_points), 
+                generator_func
+            )
+            valid_points.extend(additional_points)
+            return valid_points[:n_points]
+
+# 添加拉丁超立方抽样质量评估函数
+def evaluate_lhs_quality(points):
+    """
+    评估拉丁超立方抽样的质量
+    
+    Args:
+        points: 采样点数组，形状为(n_samples, n_dimensions)
+        
+    Returns:
+        Dict: 质量评估指标
+    """
+    try:
+        import numpy as np
+        from scipy.spatial import distance
+        
+        n_samples, n_dimensions = points.shape
+        
+        # 计算点之间的最小距离
+        dist_matrix = distance.pdist(points)
+        min_dist = np.min(dist_matrix) if len(dist_matrix) > 0 else 0
+        mean_dist = np.mean(dist_matrix) if len(dist_matrix) > 0 else 0
+        
+        # 计算空间填充度指标
+        if len(dist_matrix) > 0:
+            # 标准差/均值比 (smaller is better for uniformity)
+            cv = np.std(dist_matrix) / mean_dist if mean_dist > 0 else float('inf')
+            
+            # 最小距离/均值比 (larger is better for space-filling)
+            min_mean_ratio = min_dist / mean_dist if mean_dist > 0 else 0
+        else:
+            cv = float('inf')
+            min_mean_ratio = 0
+        
+        return {
+            'min_distance': min_dist,
+            'mean_distance': mean_dist,
+            'cv': cv,
+            'min_mean_ratio': min_mean_ratio,
+            'n_samples': n_samples,
+            'n_dimensions': n_dimensions
+        }
+    except Exception as e:
+        logger.debug(f"评估LHS质量时出错: {e}")
+        return {
+            'error': str(e),
+            'n_samples': len(points) if isinstance(points, (list, np.ndarray)) else 0
+        } 

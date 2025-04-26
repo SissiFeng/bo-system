@@ -1,0 +1,352 @@
+{
+  "models": {
+    "gaussian_process": {
+      "name": "高斯过程模型",
+      "description": "提供最佳的不确定性估计，适用于小规模问题和平滑目标函数",
+      "config": {
+        "model_type": "gaussian_process",
+        "parameters": {
+          "kernel": "matern",
+          "nu": 2.5,
+          "length_scale_bounds": [1e-5, 1e5],
+          "alpha": 1e-10,
+          "normalize_y": true,
+          "n_restarts_optimizer": 5
+        }
+      },
+      "param_descriptions": {
+        "kernel": {
+          "description": "核函数类型",
+          "type": "categorical",
+          "options": ["rbf", "matern", "rq"],
+          "default": "matern"
+        },
+        "nu": {
+          "description": "Matern核的平滑参数",
+          "type": "categorical",
+          "options": [0.5, 1.5, 2.5],
+          "default": 2.5,
+          "condition": {"kernel": "matern"}
+        },
+        "alpha": {
+          "description": "观测噪声水平",
+          "type": "float",
+          "range": [1e-10, 1.0],
+          "default": 1e-10,
+          "log_scale": true
+        },
+        "normalize_y": {
+          "description": "是否对目标值进行标准化",
+          "type": "boolean",
+          "default": true
+        },
+        "n_restarts_optimizer": {
+          "description": "超参数优化的重启次数",
+          "type": "integer",
+          "range": [1, 20],
+          "default": 5
+        }
+      }
+    },
+    "random_forest": {
+      "name": "随机森林模型",
+      "description": "适用于处理分类特征和不平滑目标函数",
+      "config": {
+        "model_type": "random_forest",
+        "parameters": {
+          "n_estimators": 100,
+          "max_depth": 20,
+          "min_samples_split": 2,
+          "min_samples_leaf": 1,
+          "bootstrap": true,
+          "random_state": 42
+        }
+      },
+      "param_descriptions": {
+        "n_estimators": {
+          "description": "森林中树的数量",
+          "type": "integer",
+          "range": [10, 500],
+          "default": 100
+        },
+        "max_depth": {
+          "description": "树的最大深度",
+          "type": "integer",
+          "range": [5, 50],
+          "default": 20
+        },
+        "min_samples_split": {
+          "description": "分裂内部节点所需的最小样本数",
+          "type": "integer",
+          "range": [2, 20],
+          "default": 2
+        },
+        "min_samples_leaf": {
+          "description": "叶节点所需的最小样本数",
+          "type": "integer",
+          "range": [1, 10],
+          "default": 1
+        },
+        "bootstrap": {
+          "description": "是否使用自助抽样",
+          "type": "boolean",
+          "default": true
+        },
+        "random_state": {
+          "description": "随机种子",
+          "type": "integer",
+          "range": [0, 999],
+          "default": 42
+        }
+      }
+    },
+    "multi_output_gp": {
+      "name": "多输出高斯过程模型",
+      "description": "用于处理多目标优化问题",
+      "config": {
+        "model_type": "multi_output_gp",
+        "parameters": {
+          "kernel": "matern",
+          "nu": 2.5,
+          "alpha": 1e-6,
+          "normalize_y": true,
+          "n_restarts_optimizer": 5,
+          "output_correlations": "learn"
+        }
+      },
+      "param_descriptions": {
+        "kernel": {
+          "description": "核函数类型",
+          "type": "categorical",
+          "options": ["rbf", "matern", "rq"],
+          "default": "matern"
+        },
+        "nu": {
+          "description": "Matern核的平滑参数",
+          "type": "categorical",
+          "options": [0.5, 1.5, 2.5],
+          "default": 2.5,
+          "condition": {"kernel": "matern"}
+        },
+        "alpha": {
+          "description": "观测噪声水平",
+          "type": "float",
+          "range": [1e-10, 1.0],
+          "default": 1e-6,
+          "log_scale": true
+        },
+        "normalize_y": {
+          "description": "是否对目标值进行标准化",
+          "type": "boolean",
+          "default": true
+        },
+        "n_restarts_optimizer": {
+          "description": "超参数优化的重启次数",
+          "type": "integer",
+          "range": [1, 20],
+          "default": 5
+        },
+        "output_correlations": {
+          "description": "输出相关性处理方式",
+          "type": "categorical",
+          "options": ["learn", "independent", "fixed"],
+          "default": "learn"
+        }
+      }
+    }
+  },
+  "acquisition_functions": {
+    "expected_improvement": {
+      "name": "期望改进 (EI)",
+      "description": "平衡探索和利用，适用于大多数场景",
+      "config": {
+        "acquisition_function": "expected_improvement",
+        "parameters": {
+          "xi": 0.01,
+          "maximize": false
+        }
+      },
+      "param_descriptions": {
+        "xi": {
+          "description": "探索-利用平衡参数",
+          "type": "float",
+          "range": [0.0001, 0.1],
+          "default": 0.01,
+          "log_scale": true
+        },
+        "maximize": {
+          "description": "是否为最大化问题",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "probability_improvement": {
+      "name": "改进概率 (PI)",
+      "description": "更偏向利用，在需要快速收敛的场景中使用",
+      "config": {
+        "acquisition_function": "probability_improvement",
+        "parameters": {
+          "xi": 0.05,
+          "maximize": false
+        }
+      },
+      "param_descriptions": {
+        "xi": {
+          "description": "改进阈值",
+          "type": "float",
+          "range": [0.001, 0.1],
+          "default": 0.05,
+          "log_scale": true
+        },
+        "maximize": {
+          "description": "是否为最大化问题",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "upper_confidence_bound": {
+      "name": "置信上界 (UCB)",
+      "description": "更加灵活的探索-利用平衡，通过 kappa 参数控制",
+      "config": {
+        "acquisition_function": "upper_confidence_bound",
+        "parameters": {
+          "kappa": 2.0,
+          "maximize": false
+        }
+      },
+      "param_descriptions": {
+        "kappa": {
+          "description": "探索参数",
+          "type": "float",
+          "range": [0.1, 5.0],
+          "default": 2.0
+        },
+        "maximize": {
+          "description": "是否为最大化问题",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "random": {
+      "name": "随机采样",
+      "description": "在模型训练失败或初始阶段使用",
+      "config": {
+        "acquisition_function": "random",
+        "parameters": {}
+      },
+      "param_descriptions": {}
+    }
+  },
+  "optimization_strategies": {
+    "default": {
+      "name": "默认优化策略",
+      "description": "适用于大多数场景的平衡策略",
+      "config": {
+        "model": {
+          "model_type": "gaussian_process",
+          "parameters": {
+            "kernel": "matern",
+            "nu": 2.5,
+            "alpha": 1e-10,
+            "normalize_y": true,
+            "n_restarts_optimizer": 5
+          }
+        },
+        "acquisition_function": {
+          "acquisition_function": "expected_improvement",
+          "parameters": {
+            "xi": 0.01,
+            "maximize": false
+          }
+        },
+        "initial_design": {
+          "design_type": "latin_hypercube",
+          "n_initial_points": 10
+        }
+      }
+    },
+    "exploration": {
+      "name": "探索型策略",
+      "description": "更注重探索未知区域",
+      "config": {
+        "model": {
+          "model_type": "gaussian_process",
+          "parameters": {
+            "kernel": "matern",
+            "nu": 2.5,
+            "alpha": 1e-8,
+            "normalize_y": true,
+            "n_restarts_optimizer": 10
+          }
+        },
+        "acquisition_function": {
+          "acquisition_function": "upper_confidence_bound",
+          "parameters": {
+            "kappa": 3.0,
+            "maximize": false
+          }
+        },
+        "initial_design": {
+          "design_type": "sobol",
+          "n_initial_points": 15
+        }
+      }
+    },
+    "exploitation": {
+      "name": "利用型策略",
+      "description": "更注重利用已知信息",
+      "config": {
+        "model": {
+          "model_type": "gaussian_process",
+          "parameters": {
+            "kernel": "rbf",
+            "alpha": 1e-10,
+            "normalize_y": true,
+            "n_restarts_optimizer": 5
+          }
+        },
+        "acquisition_function": {
+          "acquisition_function": "probability_improvement",
+          "parameters": {
+            "xi": 0.01,
+            "maximize": false
+          }
+        },
+        "initial_design": {
+          "design_type": "latin_hypercube",
+          "n_initial_points": 8
+        }
+      }
+    },
+    "high_dimensional": {
+      "name": "高维优化策略",
+      "description": "适用于高维参数空间",
+      "config": {
+        "model": {
+          "model_type": "random_forest",
+          "parameters": {
+            "n_estimators": 200,
+            "max_depth": 30,
+            "min_samples_split": 2,
+            "min_samples_leaf": 1,
+            "bootstrap": true
+          }
+        },
+        "acquisition_function": {
+          "acquisition_function": "expected_improvement",
+          "parameters": {
+            "xi": 0.02,
+            "maximize": false
+          }
+        },
+        "initial_design": {
+          "design_type": "sobol",
+          "n_initial_points": 20
+        }
+      }
+    }
+  }
+} 
