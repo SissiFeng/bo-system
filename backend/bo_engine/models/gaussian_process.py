@@ -15,17 +15,17 @@ class GaussianProcessModel(BaseModel):
     """
     Surrogate model based on Gaussian Process Regression using scikit-learn.
     """
-    def __init__(self, 
-                 parameter_space: ParameterSpace, 
-                 kernel: Optional[Any] = None, 
-                 alpha: float = 1e-10, 
-                 n_restarts_optimizer: int = 10, 
+    def __init__(self,
+                 parameter_space: ParameterSpace,
+                 kernel: Optional[Any] = None,
+                 alpha: float = 1e-10,
+                 n_restarts_optimizer: int = 10,
                  normalize_y: bool = True,
                  use_standard_scaler: bool = True, # Option to scale input features
                  **kwargs):
         """
         Initialize the Gaussian Process model.
-        
+
         Args:
             parameter_space: The parameter space definition.
             kernel: The kernel specification. If None, a default Matern kernel is used.
@@ -39,7 +39,7 @@ class GaussianProcessModel(BaseModel):
             **kwargs: Additional configuration arguments (currently unused but kept for flexibility).
         """
         super().__init__(parameter_space, **kwargs)
-        
+
         if kernel is None:
             # Default kernel: Matern nu=2.5 + WhiteKernel for noise
             # length_scale bounds encourage exploring different smoothness levels
@@ -52,7 +52,7 @@ class GaussianProcessModel(BaseModel):
         self.n_restarts_optimizer = n_restarts_optimizer
         self.normalize_y = normalize_y
         self.use_standard_scaler = use_standard_scaler
-        
+
         self.model = GaussianProcessRegressor(
             kernel=self.kernel,
             alpha=self.alpha,
@@ -60,15 +60,15 @@ class GaussianProcessModel(BaseModel):
             normalize_y=self.normalize_y,
             random_state=kwargs.get("random_state", None) # Allow setting random state
         )
-        
+
         # Scaler for input features X
         self.scaler_X = StandardScaler() if self.use_standard_scaler else None
         self._trained = False # Reset trained status from superclass init
 
-    def train(self, X: np.ndarray, y: np.ndarray):
+    def fit(self, X: np.ndarray, y: np.ndarray):
         """
         Train the Gaussian Process model.
-        
+
         Args:
             X: Observed points, shape (n_samples, n_dims) in the internal [0, 1] space.
             y: Observed objective values, shape (n_samples,). Assumes single objective.
@@ -93,7 +93,7 @@ class GaussianProcessModel(BaseModel):
             X_scaled = self.scaler_X.fit_transform(X)
         else:
             X_scaled = X
-            
+
         try:
             logger.info(f"Training GPR model with {X.shape[0]} samples and {X.shape[1]} dimensions...")
             self.model.fit(X_scaled, y)
@@ -107,24 +107,34 @@ class GaussianProcessModel(BaseModel):
             # Consider re-raising or handling specific exceptions if needed
             raise
 
+    def train(self, X: np.ndarray, y: np.ndarray):
+        """
+        Alias for fit method to maintain backward compatibility.
+
+        Args:
+            X: Observed points, shape (n_samples, n_dims) in the internal [0, 1] space.
+            y: Observed objective values, shape (n_samples,). Assumes single objective.
+        """
+        return self.fit(X, y)
+
     def predict(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Make predictions using the trained GPR model.
-        
+
         Args:
             X: Points to predict at, shape (n_points, n_dims) in the internal [0, 1] space.
-            
+
         Returns:
-            Tuple[np.ndarray, np.ndarray]: 
+            Tuple[np.ndarray, np.ndarray]:
                 - Mean prediction, shape (n_points,).
                 - Variance prediction, shape (n_points,).
         """
-        if not self.is_trained():
+        if not self._trained:
             raise RuntimeError("GPR Model must be trained before making predictions.")
-        
+
         if X.ndim == 1:
             X = X.reshape(-1, 1)
-            
+
         # Scale input features if scaler was fitted
         if self.scaler_X:
             try:
@@ -134,7 +144,7 @@ class GaussianProcessModel(BaseModel):
                  raise
         else:
             X_scaled = X
-            
+
         try:
             # Use return_std=True and square the std dev to get variance
             mean, std_dev = self.model.predict(X_scaled, return_std=True)
@@ -144,4 +154,13 @@ class GaussianProcessModel(BaseModel):
             return mean.ravel(), variance.ravel()
         except Exception as e:
             logger.error(f"GPR prediction failed: {e}", exc_info=True)
-            raise 
+            raise
+
+    def is_trained(self) -> bool:
+        """
+        Check if the model has been trained.
+
+        Returns:
+            bool: True if the model has been trained, False otherwise.
+        """
+        return self._trained

@@ -7,9 +7,9 @@ import uvicorn
 from uuid import uuid4
 import time
 
-from backend.app.core.config import get_settings
-from backend.app.core.logger import setup_logger
-from backend.app.api.endpoints import router as api_router
+from app.core.config import get_settings
+from app.core.logger import setup_logger
+from app.api.endpoints import router as api_router
 
 # Initialize settings
 settings = get_settings()
@@ -66,8 +66,8 @@ async def global_exception_handler(request, exc):
 
 if __name__ == "__main__":
     uvicorn.run(
-        "backend.app.main:app",
+        "app.main:app",
         host=settings.APP_HOST,
         port=settings.APP_PORT,
         reload=settings.APP_ENV == "development",
-    ) 
+    )

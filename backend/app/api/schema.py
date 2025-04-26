@@ -11,7 +11,7 @@ class ObjectId(str):
     @classmethod
     def __get_validators__(cls):
         yield cls.validate_id
-    
+
     @field_validator('ObjectId')
     @classmethod
     def validate_id(cls, v):
@@ -101,7 +101,7 @@ class TaskStatusResponse(BaseModel):
     current_iteration: Optional[int] = Field(None, description="Current iteration")
     total_evaluations: Optional[int] = Field(None, description="Total evaluations")
     message: Optional[str] = Field(None, description="Status message")
-    
+
     @field_validator('status')
     @classmethod
     def validate_status(cls, v):
@@ -242,11 +242,15 @@ class StrategyCreate(BaseModel):
     settings: Optional[Dict[str, Any]] = Field({}, description="other strategy settings")
 
 
-class StrategyReadResponse(StrategyCreate):
+class StrategyRead(StrategyCreate):
     """model for reading the optimization strategy"""
     task_id: str = Field(..., description="ID of the optimization task that this strategy belongs to")
     created_at: Optional[datetime] = Field(None, description="strategy creation time")
     updated_at: Optional[datetime] = Field(None, description="strategy last update time")
+
+class StrategyReadResponse(StrategyRead):
+    """model for reading the optimization strategy response"""
+    pass
 
 
 # Design Models
@@ -296,7 +300,7 @@ class ResultSubmit(BaseModel):
     objectives: Dict[str, float] = Field(..., description="objective values")
     constraints: Optional[Dict[str, float]] = Field({}, description="constraint values")
     metadata: Optional[Dict[str, Any]] = Field(None, description="additional metadata")
-    
+
     @model_validator(mode='after')
     def validate_result(self):
         """validate the result contains all required parameters and objectives"""
@@ -314,7 +318,7 @@ class ResultsSubmission(BaseModel):
 class PredictionRequest(BaseModel):
     """model for prediction request"""
     parameters: Dict[str, Any] = Field(..., description="parameter values to predict")
-    
+
     @model_validator(mode='after')
     def validate_parameters(self):
         """validate the parameters exist"""
@@ -327,7 +331,7 @@ class ModelPerformance(BaseModel):
     model_type: str = Field(..., description="used proxy model type")
     metrics: Dict[str, float] = Field(..., description="performance metrics (e.g., R², MAE, RMSE)")
     cross_validation_results: Optional[Dict[str, List[float]]] = Field(None, description="cross-validation results")
-    
+
     @field_validator('metrics')
     @classmethod
     def validate_metrics(cls, v):
@@ -353,7 +357,7 @@ class ParetoFront(BaseModel):
     """model for Pareto front"""
     points: List[Dict[str, Any]] = Field(..., description="list of non-dominated points")
     objective_names: List[str] = Field(..., description="names of objectives used for Pareto front")
-    
+
     @model_validator(mode='after')
     def validate_points(self):
         """validate the points contain all objective values"""
@@ -371,7 +375,7 @@ class UncertaintyAnalysis(BaseModel):
     parameter_name: str = Field(..., description="name of the analyzed parameter")
     uncertainty_values: List[float] = Field(..., description="uncertainty values in the parameter range")
     parameter_values: List[float] = Field(..., description="parameter values used for uncertainty evaluation")
-    
+
     @model_validator(mode='after')
     def validate_data_length(self):
         """validate the uncertainty and parameter values have the same length"""
@@ -392,6 +396,16 @@ class TaskBasicInfo(BaseModel):
     progress: float = Field(0.0, ge=0, le=100, description="progress percentage")
 
 
+class TaskInfo(TaskBasicInfo):
+    """model for task information"""
+    description: Optional[str] = Field(None, description="task description")
+
+
+class TaskList(BaseModel):
+    """model for task list"""
+    tasks: List[TaskInfo] = Field(..., description="list of all optimization tasks")
+
+
 class TaskListResponse(BaseModel):
     """model for task list response"""
     tasks: List[TaskBasicInfo] = Field(..., description="list of all optimization tasks")
@@ -401,7 +415,7 @@ class TaskListResponse(BaseModel):
 class TaskDetails(BaseModel):
     """model for detailed task information response"""
     task_id: str = Field(..., description="task ID")
-    name: str = Field(..., description="task name") 
+    name: str = Field(..., description="task name")
     status: TaskStatus = Field(..., description="current task status")
     created_at: datetime = Field(..., description="task creation time")
     updated_at: datetime = Field(..., description="last update time")
@@ -411,25 +425,25 @@ class TaskDetails(BaseModel):
     initial_designs: Optional[List[Design]] = Field(None, description="initial design points")
     results: Optional[List[ResultSubmit]] = Field(None, description="submitted results")
     next_points: Optional[List[Design]] = Field(None, description="next recommended points")
-    
+
     @model_validator(mode='after')
     def check_task_consistency(self):
         """ensure the task details are consistent with the task status"""
         # 已配置的任务应该有参数空间定义
         if self.status == TaskStatus.CONFIGURED and not self.parameter_space:
             raise ValueError("configured task must have parameter space definition")
-        
+
         # 优化中的任务应该有策略和初始设计
         if self.status == TaskStatus.OPTIMIZING:
             if not self.strategy:
                 raise ValueError("optimization task must have defined strategy")
             if not self.initial_designs:
                 raise ValueError("optimization task must have generated initial designs")
-        
+
         # 已完成的任务应该有结果
         if self.status == TaskStatus.COMPLETED and not self.results:
             raise ValueError("completed task must have submitted results")
-        
+
         return self
 
 
@@ -441,7 +455,7 @@ class TaskStatusUpdateResponse(BaseModel):
     progress: float = Field(..., ge=0, le=100, description="progress percentage")
     last_updated: datetime = Field(..., description="last update timestamp")
     message: Optional[str] = Field(None, description="Status message")
-    
+
     @field_validator('status')
     @classmethod
     def validate_status(cls, v):
@@ -450,6 +464,19 @@ class TaskStatusUpdateResponse(BaseModel):
         if v not in allowed:
             raise ValueError(f"Status must be one of: {', '.join(allowed)}")
         return v
+
+
+class TaskStatusResponse(BaseModel):
+    """model for task status response"""
+    id: str = Field(..., description="task ID")
+    name: str = Field(..., description="task name")
+    status: str = Field(..., description="task status")
+    created_at: datetime = Field(..., description="creation timestamp")
+    updated_at: datetime = Field(..., description="last update timestamp")
+    progress: float = Field(..., ge=0, le=100, description="progress percentage")
+    current_iteration: Optional[int] = Field(None, description="current iteration")
+    total_iterations: Optional[int] = Field(None, description="total iterations")
+    best_result: Optional[Dict[str, Any]] = Field(None, description="best result so far")
 
 
 # Task Restart Model
@@ -475,7 +502,7 @@ class TaskCreate(BaseModel):
     """Model for creating a new optimization task."""
     name: str = Field(..., description="Name of the task")
     description: Optional[str] = Field(None, description="Description of the task")
-    
+
     @field_validator('name')
     @classmethod
     def validate_name(cls, v):
@@ -492,7 +519,7 @@ class DiagnosticsResponse(BaseModel):
     memory_usage: float = Field(..., ge=0, description="Current memory usage in MB")
     active_tasks: int = Field(..., ge=0, description="Number of active tasks")
     storage_usage: float = Field(..., ge=0, description="Storage usage in MB")
-    
+
     @field_validator('system_health')
     @classmethod
     def validate_system_health(cls, v):
@@ -501,16 +528,15 @@ class DiagnosticsResponse(BaseModel):
         if v not in allowed:
             raise ValueError(f"System health must be one of: {', '.join(allowed)}")
         return v
-        
+
     @model_validator(mode='after')
     def validate_health_consistency(self):
         """Validate system health is consistent with resource usage."""
         cpu_threshold = 90
         memory_threshold = 85
-        
+
         if self.cpu_usage > cpu_threshold or self.memory_usage > memory_threshold:
             if self.system_health == "healthy":
                 raise ValueError("System health cannot be 'healthy' when resource usage exceeds thresholds")
-                
+
         return self
- 

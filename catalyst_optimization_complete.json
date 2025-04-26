@@ -1,0 +1,55 @@
+{
+  "name": "Catalyst Multi-Objective Optimization Experiment",
+  "description": "Optimize catalyst composition and preparation conditions to balance LSV performance and CV stability",
+  "parameters": [
+    {
+      "name": "Ni_ratio",
+      "type": "continuous",
+      "bounds": [0.0, 0.8],
+      "description": "Nickel element ratio"
+    },
+    {
+      "name": "Co_ratio",
+      "type": "continuous",
+      "bounds": [0.0, 0.8],
+      "description": "Cobalt element ratio"
+    },
+    {
+      "name": "Fe_ratio",
+      "type": "continuous",
+      "bounds": [0.0, 0.8],
+      "description": "Iron element ratio"
+    },
+    {
+      "name": "sintering_temperature",
+      "type": "integer",
+      "bounds": [400, 900],
+      "description": "Sintering temperature (°C)"
+    },
+    {
+      "name": "electrolyte_concentration",
+      "type": "continuous",
+      "bounds": [0.1, 2.0],
+      "description": "Electrolyte concentration (mol/L)"
+    },
+    {
+      "name": "current_density",
+      "type": "continuous",
+      "bounds": [5, 50],
+      "description": "Current density (mA/cm²)"
+    }
+  ],
+  "objectives": [
+    {
+      "name": "LSV_slope",
+      "direction": "maximize",
+      "description": "LSV curve slope, higher is better, represents catalytic efficiency"
+    },
+    {
+      "name": "CV_stability",
+      "direction": "minimize",
+      "description": "CV area difference before and after, lower is better, represents stability"
+    }
+  ],
+  "constraints": []
+}

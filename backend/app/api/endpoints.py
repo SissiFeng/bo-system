@@ -11,15 +11,15 @@ from pathlib import Path as PathLib
 import asyncio
 import numpy as np
 
-from backend.app.core.config import get_settings
-from backend.app.core.logger import setup_logger
-from backend.app.api import schema
-from backend.bo_engine.parameter_space import ParameterSpace
-from backend.bo_engine.design_generator import create_design_generator, DesignType
-from backend.bo_engine.utils import generate_unique_id
-from backend.bo_engine.optimizer import BayesianOptimizer
-from backend.bo_engine.models import GaussianProcessModel
-from backend.bo_engine.acquisition import ExpectedImprovement
+from app.core.config import get_settings
+from app.core.logger import setup_logger
+from app.api import schema
+from bo_engine.parameter_space import ParameterSpace
+from bo_engine.design_generator import create_design_generator, DesignType
+from bo_engine.utils import generate_unique_id
+from bo_engine.optimizer import BayesianOptimizer
+from bo_engine.models import GaussianProcessModel
+from bo_engine.acquisition import ExpectedImprovement
 
 # Setup
 settings = get_settings()
@@ -53,6 +53,9 @@ def generate_error_response(status_code: int, message: str) -> JSONResponse:
 
 def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
     """Gets the optimizer instance for a task_id, creating it if it doesn't exist."""
+    # 获取全局设置
+    settings = get_settings()
+
     if task_id in optimizers:
         logger.debug(f"Optimizer instance found in memory for task {task_id}.")
         return optimizers[task_id]
@@ -68,7 +71,7 @@ def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
     try:
         with open(ps_file, "r") as f:
             ps_config = json.load(f)
-        
+
         # Create parameter space from API config
         parameter_space_obj = ParameterSpace.from_api_config(ps_config)
         logger.info(f"Successfully loaded parameter space for task {task_id}")
@@ -81,26 +84,26 @@ def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
     acquisition_class = ExpectedImprovement  # Default acquisition class
     model_config = {}  # Default empty model config
     acquisition_config = {}  # Default empty acquisition config
-    
+
     strategy_file = task_dir / "strategy.json"
     if strategy_file.exists():
         try:
             with open(strategy_file, "r") as f:
                 strategy_config = json.load(f)
             logger.info(f"Successfully loaded strategy config from {strategy_file}")
-            
+
             # Map strategy model_type to model class
             model_type = strategy_config.get("model_type", "").lower()
             if model_type == "gp" or model_type == "gaussian_process":
                 model_class = GaussianProcessModel
             # Add mappings for other model types as they are implemented
-            
+
             # Extract acquisition function
             acq_type = strategy_config.get("acquisition_type", "").lower()
             if acq_type == "ei" or acq_type == "expected_improvement":
                 acquisition_class = ExpectedImprovement
             # Add mappings for other acquisition functions as they are implemented
-            
+
             # Extract settings for model and acquisition function
             settings = strategy_config.get("settings", {})
             # Separate settings into model_config and acquisition_config
@@ -111,9 +114,9 @@ def get_or_create_optimizer(task_id: str) -> BayesianOptimizer:
                 model_config["kernel"] = settings["kernel"]
             if "noise_level" in settings:
                 model_config["noise_level"] = float(settings["noise_level"])
-                
+
             logger.debug(f"Using model_config: {model_config}, acquisition_config: {acquisition_config}")
-            
+
         except Exception as e:
             logger.warning(f"Failed to load strategy from {strategy_file}: {e}. Using defaults.", exc_info=True)
     else:
@@ -183,10 +186,10 @@ async def create_parameter_space(data: schema.ParameterSpaceConfig):
     Create a new optimization task by defining a parameter space using the declarative configuration format.
     """
     logger.info(f"Creating parameter space: {data.name}")
-    
+
     # Generate a unique task ID
     task_id = generate_id()
-    
+
     # Store the parameter space with response model
     now = datetime.now()
     parameter_spaces[task_id] = schema.ParameterSpaceReadResponse(
@@ -195,31 +198,35 @@ async def create_parameter_space(data: schema.ParameterSpaceConfig):
         created_at=now,
         updated_at=now,
     )
-    
+
     # Create a task entry
     task_info = {
         "task_id": task_id,
         "name": data.name,
-        "status": schema.TaskStatus.CONFIGURED.value,  # Updated status to CONFIGURED
+        "status": schema.TaskStatus.CONFIGURED.value,  # 使用CONFIGURED状态
         "created_at": now,
         "updated_at": now,
         "progress": 0.0,  # Initial progress is 0%
         "description": data.description or "",  # Optional description
     }
     tasks[task_id] = task_info
-    
+
     # Create task directory
     task_dir = PathLib(settings.TASK_DIR) / task_id
     os.makedirs(task_dir, exist_ok=True)
-    
+
     # Save parameter space to file
     with open(task_dir / "parameter_space.json", "w") as f:
-        json.dump(parameter_spaces[task_id].dict(), f, default=str)
-    
+        ps_data = parameter_spaces[task_id].dict()
+        # 确保constraints字段存在且为空列表，而不是None
+        if "constraints" not in ps_data or ps_data["constraints"] is None:
+            ps_data["constraints"] = []
+        json.dump(ps_data, f, default=str)
+
     # Save task info to file
     with open(task_dir / "task_info.json", "w") as f:
         json.dump(task_info, f, default=str)
-    
+
     return schema.ParameterSpaceCreateResponse(
         task_id=task_id,
         message=f"Parameter space '{data.name}' created successfully",
@@ -233,7 +240,7 @@ async def get_parameter_space(task_id: str = Path(..., description="Task ID")):
     """
     if task_id not in parameter_spaces:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     return parameter_spaces[task_id]
 
 
@@ -247,7 +254,7 @@ async def update_parameter_space(
     """
     if task_id not in parameter_spaces:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # Update parameter space
     now = datetime.now()
     parameter_spaces[task_id] = schema.ParameterSpaceReadResponse(
@@ -256,16 +263,16 @@ async def update_parameter_space(
         created_at=parameter_spaces[task_id].created_at,
         updated_at=now,
     )
-    
+
     # Update task
     tasks[task_id]["name"] = data.name
     tasks[task_id]["updated_at"] = now
-    
+
     # Update file
     task_dir = PathLib(settings.TASK_DIR) / task_id
     with open(task_dir / "parameter_space.json", "w") as f:
         json.dump(parameter_spaces[task_id].dict(), f, default=str)
-    
+
     return schema.ParameterSpaceCreateResponse(
         task_id=task_id,
         message=f"Parameter space updated successfully",
@@ -283,7 +290,7 @@ async def set_strategy(
     """
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # Save strategy
     now = datetime.now()
     strategies[task_id] = schema.StrategyRead(
@@ -292,12 +299,12 @@ async def set_strategy(
         created_at=now,
         updated_at=now,
     )
-    
+
     # Save to file
     task_dir = PathLib(settings.TASK_DIR) / task_id
     with open(task_dir / "strategy.json", "w") as f:
         json.dump(strategies[task_id].dict(), f, default=str)
-    
+
     return {"message": "Strategy set successfully"}
 
 
@@ -308,7 +315,7 @@ async def get_strategy(task_id: str = Path(..., description="Task ID")):
     """
     if task_id not in strategies:
         raise HTTPException(status_code=404, detail=f"No strategy set for task {task_id}")
-    
+
     return strategies[task_id]
 
 # ----- 3. Experiment Design API -----
@@ -331,7 +338,7 @@ async def get_initial_designs(
     try:
         with open(ps_file, "r") as f:
             ps_config = json.load(f)
-        
+
         # Create parameter space from API config
         parameter_space_obj = ParameterSpace.from_api_config(ps_config)
         logger.info(f"Successfully loaded parameter space for task {task_id}")
@@ -357,12 +364,12 @@ async def get_initial_designs(
     strategy_file = task_dir / "strategy.json"
     design_type = DesignType.LATIN_HYPERCUBE  # Default design type
     n_samples = samples or settings.DEFAULT_INITIAL_SAMPLES
-    
+
     if strategy_file.exists():
         try:
             with open(strategy_file, "r") as f:
                 strategy_config = json.load(f)
-            
+
             # Get design type from strategy if available
             if "initial_design_type" in strategy_config:
                 design_type_str = strategy_config["initial_design_type"].lower()
@@ -376,7 +383,7 @@ async def get_initial_designs(
                     design_type = DesignType.FACTORIAL
                 else:
                     logger.warning(f"Unknown design type '{design_type_str}', using default {design_type.value}")
-            
+
             # Get number of initial points from strategy if available
             if "n_initial_points" in strategy_config:
                 n_samples = strategy_config["n_initial_points"]
@@ -387,7 +394,7 @@ async def get_initial_designs(
     # --- Generate Initial Designs ---
     try:
         logger.info(f"Generating {n_samples} initial designs using {design_type.value} for task {task_id}")
-        # Create the design generator 
+        # Create the design generator
         design_generator = create_design_generator(parameter_space_obj, design_type)
 
         # Generate design points (list of dictionaries: {param_name: value})
@@ -414,7 +421,7 @@ async def get_initial_designs(
             # Convert Pydantic models to dicts for JSON serialization
             json.dump([d.dict() for d in final_designs], f)
         logger.info(f"Saved {len(final_designs)} designs to {designs_file}")
-        
+
         # Update task status if needed
         if task_id in tasks:
             tasks[task_id]["status"] = schema.TaskStatus.READY_FOR_RESULTS.value
@@ -426,7 +433,7 @@ async def get_initial_designs(
     except Exception as e:
         logger.error(f"Failed to save designs for task {task_id}: {e}", exc_info=True)
         # Continue despite save error - we can still return the generated designs
-    
+
     return schema.DesignResponse(designs=final_designs)
 
 
@@ -439,7 +446,7 @@ async def submit_results(
     Submit experiment results and update the optimizer state.
     """
     task_dir = PathLib(settings.TASK_DIR) / task_id
-    
+
     # Check if task exists, try to load if not in memory
     if task_id not in tasks:
         task_info_file = task_dir / "task_info.json"
@@ -490,14 +497,14 @@ async def submit_results(
 
         # Update task status and time
         now = datetime.now()
-        tasks[task_id]["status"] = schema.TaskStatus.RUNNING.value
+        tasks[task_id]["status"] = schema.TaskStatus.OPTIMIZING.value
         tasks[task_id]["updated_at"] = now
 
         # Update progress based on results count
         results_file = task_dir / "results.json"
         results_count = 0
         all_results = []
-        
+
         if results_file.exists():
              try:
                  with open(results_file, "r") as f:
@@ -505,11 +512,11 @@ async def submit_results(
                  results_count = len(all_results)
              except Exception as e:
                  logger.warning(f"Could not read existing results file {results_file}: {e}. Overwriting.")
-        
+
         # Append new valid results
         all_results.extend([res.dict() for res in results_data.results if isinstance(res.parameters, dict) and isinstance(res.objectives, dict) and res.objectives])
         results_count = len(all_results)
-        
+
         # Calculate progress
         strategy_file = task_dir / "strategy.json"
         total_iterations = None
@@ -520,7 +527,7 @@ async def submit_results(
                 total_iterations = strategy_data.get("iterations")
             except Exception as e:
                 logger.warning(f"Failed to read strategy file for task {task_id}: {e}", exc_info=False)
-        
+
         # Update progress in task info
         if total_iterations is not None and total_iterations > 0:
             tasks[task_id]["progress"] = min(100.0, (results_count / total_iterations) * 100.0)
@@ -528,7 +535,7 @@ async def submit_results(
             # Simple progress estimation
             if results_count > 0:
                 tasks[task_id]["progress"] = min(80.0, results_count * 5.0)  # Arbitrary progress scale
-        
+
         # Save updated task info
         task_info_file = task_dir / "task_info.json"
         with open(task_info_file, "w") as f:
@@ -539,7 +546,7 @@ async def submit_results(
             if isinstance(task_info.get("updated_at"), datetime):
                 task_info["updated_at"] = task_info["updated_at"].isoformat()
             json.dump(task_info, f, default=str)
-        
+
         # Save results to file
         try:
              with open(results_file, "w") as f:
@@ -550,7 +557,7 @@ async def submit_results(
 
     except Exception as e:
         logger.error(f"Failed to observe results or retrain model for task {task_id}: {e}", exc_info=True)
-        
+
         # Record error in error log
         try:
             error_log_file = task_dir / "error.log"
@@ -558,7 +565,7 @@ async def submit_results(
                 f.write(f"[{datetime.now().isoformat()}] Error submitting results: {str(e)}\n")
         except Exception:
             pass  # Silently ignore error log write failures
-            
+
         raise HTTPException(status_code=500, detail=f"Error processing results: {str(e)}")
 
     return {
@@ -655,7 +662,7 @@ async def predict(
     """
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # 获取或创建优化器实例，其中包含已训练的模型
     try:
         optimizer = get_or_create_optimizer(task_id)
@@ -664,32 +671,32 @@ async def predict(
     except Exception as e:
         logger.error(f"获取优化器时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取优化器失败: {str(e)}")
-    
+
     # 检查模型是否已训练
     if not optimizer.model.is_trained():
         raise HTTPException(status_code=400, detail="模型尚未训练，请先提交实验结果")
-    
+
     # 准备预测的点
     parameter_combinations = prediction_request.parameters
     if not isinstance(parameter_combinations, list):
         parameter_combinations = [parameter_combinations]
-    
+
     # 进行预测
     predictions = []
     for params in parameter_combinations:
         try:
             # 将参数转换为内部表示
             internal_point = optimizer.parameter_space.point_to_internal(params)
-            
+
             # 使用模型进行预测
             mean, variance = optimizer.model.predict(internal_point.reshape(1, -1))
             std_dev = np.sqrt(np.maximum(variance, 0))  # 确保标准差非负
-            
+
             # 获取目标名称
             objective_names = list(optimizer.parameter_space.objectives.keys())
             if not objective_names:
                 objective_names = ["objective"]  # 默认目标名称
-            
+
             # 创建预测响应
             objectives_dict = {}
             for i, obj_name in enumerate(objective_names):
@@ -704,20 +711,20 @@ async def predict(
                         "mean": float(mean[0]),
                         "std": float(std_dev[0])
                     }
-            
+
             predictions.append({
                 "parameters": params,
                 "objectives": objectives_dict
             })
-            
+
         except Exception as e:
             logger.error(f"预测参数 {params} 时出错: {e}", exc_info=True)
             # 跳过失败的预测点而不是整个请求失败
             continue
-    
+
     if not predictions:
         raise HTTPException(status_code=422, detail="无法为任何提供的参数组合生成预测")
-    
+
     return schema.PredictionResponse(predictions=predictions)
 
 
@@ -728,7 +735,7 @@ async def get_model_performance(task_id: str = Path(..., description="Task ID"))
     """
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # 获取或创建优化器实例
     try:
         optimizer = get_or_create_optimizer(task_id)
@@ -737,21 +744,21 @@ async def get_model_performance(task_id: str = Path(..., description="Task ID"))
     except Exception as e:
         logger.error(f"获取优化器时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取优化器失败: {str(e)}")
-    
+
     # 检查模型是否已训练
     if not optimizer.model.is_trained():
         raise HTTPException(status_code=400, detail="模型尚未训练，请先提交实验结果")
-    
+
     # 从优化器和模型中获取性能指标
     try:
         # 获取训练数据（已转换为内部表示的数据）
         X_train = np.array(optimizer.X_observed)
         y_train = np.array(optimizer.y_observed)
-        
+
         if len(X_train) < 5:  # 数据点太少，无法进行可靠的交叉验证
             # 直接使用训练数据计算性能指标
             metrics = optimizer.model.score(X_train, y_train)
-            
+
             return schema.ModelPerformance(
                 model_type=optimizer.model.__class__.__name__,
                 metrics=metrics,
@@ -762,49 +769,49 @@ async def get_model_performance(task_id: str = Path(..., description="Task ID"))
             from sklearn.model_selection import KFold
             from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
             import numpy as np
-            
+
             # 使用5折交叉验证（或调整为适合数据大小的折数）
             n_splits = min(5, len(X_train))
             kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-            
+
             r2_scores = []
             rmse_scores = []
             mae_scores = []
-            
+
             # 执行交叉验证
             for train_idx, test_idx in kf.split(X_train):
                 # 分割数据
                 X_cv_train, X_cv_test = X_train[train_idx], X_train[test_idx]
                 y_cv_train, y_cv_test = y_train[train_idx], y_train[test_idx]
-                
+
                 # 创建一个新的模型实例进行训练
                 temp_model = optimizer.model.__class__(optimizer.parameter_space, **optimizer.model._config)
                 temp_model.train(X_cv_train, y_cv_train)
-                
+
                 # 预测测试集
                 y_pred, _ = temp_model.predict(X_cv_test)
-                
+
                 # 计算性能指标
                 r2 = r2_score(y_cv_test, y_pred)
                 rmse = np.sqrt(mean_squared_error(y_cv_test, y_pred))
                 mae = mean_absolute_error(y_cv_test, y_pred)
-                
+
                 r2_scores.append(r2)
                 rmse_scores.append(rmse)
                 mae_scores.append(mae)
-            
+
             # 计算平均性能指标
             mean_r2 = float(np.mean(r2_scores))
             mean_rmse = float(np.mean(rmse_scores))
             mean_mae = float(np.mean(mae_scores))
-            
+
             # 返回性能指标和交叉验证结果
             metrics = {
                 "r2": mean_r2,
                 "rmse": mean_rmse,
                 "mae": mean_mae
             }
-            
+
             cv_results = {
                 "r2_scores": [float(score) for score in r2_scores],
                 "rmse_scores": [float(score) for score in rmse_scores],
@@ -816,13 +823,13 @@ async def get_model_performance(task_id: str = Path(..., description="Task ID"))
                 "std_rmse": float(np.std(rmse_scores)),
                 "std_mae": float(np.std(mae_scores))
             }
-            
+
             return schema.ModelPerformance(
                 model_type=optimizer.model.__class__.__name__,
                 metrics=metrics,
                 cross_validation_results=cv_results
             )
-            
+
     except Exception as e:
         logger.error(f"计算模型性能指标时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"计算模型性能指标失败: {str(e)}")
@@ -835,42 +842,42 @@ async def get_pareto_front(task_id: str = Path(..., description="Task ID")):
     """
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # 加载参数空间以检查目标数量
     task_dir = PathLib(settings.TASK_DIR) / task_id
     ps_file = task_dir / "parameter_space.json"
     if not ps_file.exists():
         raise HTTPException(status_code=404, detail=f"Parameter space config not found for task {task_id}")
-    
+
     try:
         with open(ps_file, "r") as f:
             ps_config = json.load(f)
-        
+
         objectives = ps_config.get("objectives", {})
         if len(objectives) < 2:
             raise HTTPException(status_code=400, detail="Pareto front requires at least two objectives")
-        
+
         # 目标名称列表
         objective_names = list(objectives.keys())
-        
+
         # 加载所有已提交的结果
         results_file = task_dir / "results.json"
         if not results_file.exists():
             raise HTTPException(status_code=400, detail="No results submitted yet")
-        
+
         with open(results_file, "r") as f:
             results_data = json.load(f)
-        
+
         if not results_data:
             raise HTTPException(status_code=400, detail="No results submitted yet")
-        
+
         # 准备数据
         points = []
         for result in results_data:
             # 检查结果是否包含所有目标
             if 'objectives' not in result or not all(obj in result['objectives'] for obj in objective_names):
                 continue
-            
+
             # 提取参数和目标值
             point = {
                 'id': result.get('id', str(uuid.uuid4())[:8]),
@@ -878,16 +885,16 @@ async def get_pareto_front(task_id: str = Path(..., description="Task ID")):
                 'objectives': {obj: float(result['objectives'][obj]) for obj in objective_names}
             }
             points.append(point)
-        
+
         if not points:
             raise HTTPException(status_code=400, detail="No valid results with all objectives found")
-        
+
         # 确定每个目标的优化方向
         directions = {}
         for obj_name, obj_config in objectives.items():
             # 假设目标配置中有"type"字段，值为"maximize"或"minimize"
             directions[obj_name] = 1 if obj_config.get('type') == 'maximize' else -1
-        
+
         # 确定帕累托前沿
         # 用于检查点a是否支配点b
         def dominates(a, b, directions):
@@ -896,33 +903,33 @@ async def get_pareto_front(task_id: str = Path(..., description="Task ID")):
                 # 根据方向调整比较
                 dir_a = a['objectives'][obj] * directions[obj]
                 dir_b = b['objectives'][obj] * directions[obj]
-                
+
                 if dir_a < dir_b:  # a在该目标上更差
                     return False
                 if dir_a > dir_b:  # a在该目标上更好
                     better_in_any = True
             return better_in_any  # 只有当a在至少一个目标上更好时才支配b
-        
+
         # 找出非支配点（帕累托前沿）
         pareto_front = []
         dominated_solutions = []
-        
+
         for i, point in enumerate(points):
             is_dominated = False
             for other_point in points:
                 if point != other_point and dominates(other_point, point, directions):
                     is_dominated = True
                     break
-            
+
             if not is_dominated:
                 pareto_front.append(point)
             else:
                 dominated_solutions.append(point)
-        
+
         # 计算理想点和最差点
         ideal_point = {}
         nadir_point = {}
-        
+
         for obj in objective_names:
             if directions[obj] > 0:  # maximize
                 ideal_point[obj] = max(point['objectives'][obj] for point in points)
@@ -930,13 +937,13 @@ async def get_pareto_front(task_id: str = Path(..., description="Task ID")):
             else:  # minimize
                 ideal_point[obj] = min(point['objectives'][obj] for point in points)
                 nadir_point[obj] = max(point['objectives'][obj] for point in points)
-        
+
         # 构建响应
         return schema.ParetoFront(
             points=pareto_front,
             objective_names=objective_names
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -954,7 +961,7 @@ async def get_uncertainty_analysis(
     """
     if task_id not in tasks:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # 获取优化器实例
     try:
         optimizer = get_or_create_optimizer(task_id)
@@ -963,27 +970,27 @@ async def get_uncertainty_analysis(
     except Exception as e:
         logger.error(f"获取优化器时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"获取优化器失败: {str(e)}")
-    
+
     # 检查模型是否已训练
     if not optimizer.model.is_trained():
         raise HTTPException(status_code=400, detail="模型尚未训练，请先提交实验结果")
-    
+
     try:
         # 如果没有指定参数名，选择第一个参数
         param_space = optimizer.parameter_space
         param_names = list(param_space.get_parameters().keys())
-        
+
         if not param_names:
             raise HTTPException(status_code=500, detail="Parameter space has no parameters")
-        
+
         # 如果没有指定参数名或指定的参数名不存在，使用第一个参数
         if parameter_name is None or parameter_name not in param_names:
             parameter_name = param_names[0]
             logger.info(f"No specific parameter requested, using first parameter: {parameter_name}")
-        
+
         # 获取参数的定义
         param_info = param_space.get_parameters()[parameter_name]
-        
+
         # 创建用于分析的参数值网格
         if param_info["type"] == "continuous":
             param_min = param_info["min"]
@@ -1000,26 +1007,26 @@ async def get_uncertainty_analysis(
             param_values = param_info["values"]
         else:
             raise ValueError(f"不支持的参数类型: {param_info['type']}")
-        
+
         # 计算每个参数值点的不确定性
         uncertainty_values = []
-        
+
         # 获取固定参数值（使用已知观测的中值）
         # 这是为了在只变化一个参数时，固定其他参数
         X_internal = np.array(optimizer.X_observed)
         X_external = [optimizer.parameter_space.internal_to_point(x) for x in X_internal]
-        
+
         # 计算每个参数的中值或众数
         fixed_params = {}
         for param in param_names:
             if param == parameter_name:
                 continue  # 跳过我们正在分析的参数
-                
+
             # 收集该参数的所有观测值
             observed_values = [x[param] for x in X_external if param in x]
             if not observed_values:
                 continue
-                
+
             # 根据参数类型计算中值或众数
             param_type = param_space.get_parameters()[param]["type"]
             if param_type == "categorical":
@@ -1029,19 +1036,19 @@ async def get_uncertainty_analysis(
             else:
                 # 使用中值作为固定值
                 fixed_params[param] = float(np.median(observed_values))
-        
+
         # 对每个参数值计算预测及其不确定性
         for value in param_values:
             # 构建预测点
             prediction_point = {**fixed_params, parameter_name: value}
-            
+
             try:
                 # 将点转换为内部表示
                 internal_point = param_space.point_to_internal(prediction_point)
-                
+
                 # 预测
                 _, variance = optimizer.model.predict(internal_point.reshape(1, -1))
-                
+
                 # 使用预测的标准差作为不确定性度量
                 uncertainty = float(np.sqrt(max(0, variance[0])))
                 uncertainty_values.append(uncertainty)
@@ -1049,17 +1056,17 @@ async def get_uncertainty_analysis(
                 logger.warning(f"为参数值 {value} 计算不确定性时出错: {e}")
                 # 如果某个点计算失败，使用 NaN 或最后一个有效值
                 uncertainty_values.append(float('nan') if not uncertainty_values else uncertainty_values[-1])
-        
+
         # 将所有参数值转换为字符串表示以便 JSON 序列化
         param_values_serializable = [str(val) if isinstance(val, (list, dict)) else val for val in param_values]
-        
+
         # 返回不确定性分析结果
         return schema.UncertaintyAnalysis(
             parameter_name=parameter_name,
             uncertainty_values=uncertainty_values,
             parameter_values=param_values_serializable
         )
-        
+
     except Exception as e:
         logger.error(f"计算不确定性分析时出错: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"不确定性分析失败: {str(e)}")
@@ -1073,38 +1080,38 @@ async def get_tasks():
     """
     # Scan task directory to get all tasks - even those not loaded in memory
     task_list = []
-    
+
     # First, add tasks that are already in memory
     for task_id, task_info in tasks.items():
         task_list.append(schema.TaskInfo(**task_info))
-    
+
     # Then scan the task directory for any tasks not yet loaded in memory
     task_dir_base = PathLib(settings.TASK_DIR)
     if task_dir_base.exists():
         for task_dir in task_dir_base.iterdir():
             if task_dir.is_dir():
                 task_id = task_dir.name
-                
+
                 # Skip if already in memory
                 if task_id in tasks:
                     continue
-                
+
                 # Try to load task_info.json
                 task_info_file = task_dir / "task_info.json"
                 if task_info_file.exists():
                     try:
                         with open(task_info_file, "r") as f:
                             task_info = json.load(f)
-                        
+
                         # Convert string dates to datetime objects if needed
                         if isinstance(task_info.get("created_at"), str):
                             task_info["created_at"] = datetime.fromisoformat(task_info["created_at"].replace('Z', '+00:00'))
                         if isinstance(task_info.get("updated_at"), str):
                             task_info["updated_at"] = datetime.fromisoformat(task_info["updated_at"].replace('Z', '+00:00'))
-                        
+
                         # Add to in-memory tasks dictionary
                         tasks[task_id] = task_info
-                        
+
                         # Add to the response list
                         task_list.append(schema.TaskInfo(**task_info))
                         logger.debug(f"Loaded task {task_id} from disk")
@@ -1117,31 +1124,31 @@ async def get_tasks():
                         try:
                             with open(ps_file, "r") as f:
                                 ps_config = json.load(f)
-                            
+
                             # Create minimal task info from parameter space
                             name = ps_config.get("name", f"Task {task_id}")
                             minimal_task_info = {
                                 "task_id": task_id,
                                 "name": name,
-                                "status": schema.TaskStatus.CREATED.value,
+                                "status": schema.TaskStatus.CONFIGURED.value,
                                 "created_at": datetime.now(),  # Use current time as fallback
                                 "updated_at": datetime.now(),
                                 "progress": 0.0,
                             }
                             tasks[task_id] = minimal_task_info
                             task_list.append(schema.TaskInfo(**minimal_task_info))
-                            
+
                             # Create task_info.json for future reference
                             with open(task_info_file, "w") as f:
                                 json.dump(minimal_task_info, f, default=str)
-                                
+
                             logger.warning(f"Reconstructed minimal task info for {task_id}")
                         except Exception as e:
                             logger.error(f"Failed to reconstruct task info for {task_id}: {e}", exc_info=True)
-    
+
     # Sort tasks by creation date, newest first
     task_list.sort(key=lambda x: x.created_at, reverse=True)
-    
+
     return schema.TaskList(tasks=task_list)
 
 
@@ -1155,18 +1162,18 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
         # Try to load task from disk
         task_dir = PathLib(settings.TASK_DIR) / task_id
         task_info_file = task_dir / "task_info.json"
-        
+
         if task_info_file.exists():
             try:
                 with open(task_info_file, "r") as f:
                     task_info = json.load(f)
-                
+
                 # Convert string dates to datetime objects if needed
                 if isinstance(task_info.get("created_at"), str):
                     task_info["created_at"] = datetime.fromisoformat(task_info["created_at"].replace('Z', '+00:00'))
                 if isinstance(task_info.get("updated_at"), str):
                     task_info["updated_at"] = datetime.fromisoformat(task_info["updated_at"].replace('Z', '+00:00'))
-                
+
                 # Add to in-memory tasks dictionary
                 tasks[task_id] = task_info
                 logger.debug(f"Loaded task {task_id} from disk for status check")
@@ -1175,10 +1182,10 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
                 raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         else:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # Get task info
     task_info = tasks[task_id]
-    
+
     # Get number of iterations (results submitted)
     results_count = 0
     task_dir = PathLib(settings.TASK_DIR) / task_id
@@ -1190,7 +1197,7 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
             results_count = len(results_data)
         except Exception as e:
             logger.warning(f"Failed to read results file for task {task_id}: {e}", exc_info=False)
-    
+
     # Get best result (if any)
     best_result = None
     if results_count > 0:
@@ -1202,36 +1209,36 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
                 logger.debug(f"Found best result for task {task_id} using optimizer")
         except Exception as e:
             logger.warning(f"Could not use optimizer to find best result for task {task_id}: {e}", exc_info=False)
-            
+
             # Fallback: find best result manually from results file
             if results_file.exists():
                 try:
                     with open(results_file, "r") as f:
                         results_data = json.load(f)
-                    
+
                     # Load parameter space to get objective type (min/max)
                     ps_file = task_dir / "parameter_space.json"
                     if ps_file.exists():
                         with open(ps_file, "r") as f:
                             ps_config = json.load(f)
-                        
+
                         # Get first objective and its type
                         objectives = ps_config.get("objectives", {})
                         if objectives:
                             first_obj_name = next(iter(objectives))
                             minimize = objectives[first_obj_name].get("type") == "minimize"
-                            
+
                             # Find best result
                             best_idx = None
                             best_val = float('inf') if minimize else float('-inf')
-                            
+
                             for i, res in enumerate(results_data):
                                 if 'objectives' in res and first_obj_name in res['objectives']:
                                     val = float(res['objectives'][first_obj_name])
                                     if (minimize and val < best_val) or (not minimize and val > best_val):
                                         best_val = val
                                         best_idx = i
-                            
+
                             if best_idx is not None:
                                 best_result = {
                                     "parameters": results_data[best_idx]['parameters'],
@@ -1240,7 +1247,7 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
                                 logger.debug(f"Found best result for task {task_id} manually")
                 except Exception as e:
                     logger.warning(f"Failed to manually find best result for task {task_id}: {e}", exc_info=False)
-    
+
     # Get total iterations from strategy if available
     total_iterations = None
     strategy_file = task_dir / "strategy.json"
@@ -1251,7 +1258,7 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
             total_iterations = strategy_data.get("iterations")
         except Exception as e:
             logger.warning(f"Failed to read strategy file for task {task_id}: {e}", exc_info=False)
-    
+
     # Calculate progress percentage
     progress = 0.0
     if total_iterations is not None and total_iterations > 0:
@@ -1259,9 +1266,15 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
     else:
         # If total_iterations not set, use a simple scale: 0% -> 100% based on status
         status = task_info["status"]
-        if status == schema.TaskStatus.CREATED.value:
+        if status == schema.TaskStatus.PENDING.value:
             progress = 0.0
-        elif status == schema.TaskStatus.RUNNING.value:
+        elif status == schema.TaskStatus.CONFIGURED.value:
+            progress = 10.0
+        elif status == schema.TaskStatus.GENERATING_INITIAL.value:
+            progress = 20.0
+        elif status == schema.TaskStatus.READY_FOR_RESULTS.value:
+            progress = 30.0
+        elif status == schema.TaskStatus.OPTIMIZING.value or status == schema.TaskStatus.RUNNING.value:
             progress = 50.0  # Halfway
         elif status == schema.TaskStatus.PAUSED.value:
             progress = 70.0  # More than halfway
@@ -1269,7 +1282,7 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
             progress = 100.0  # Complete
         elif status == schema.TaskStatus.FAILED.value:
             progress = 30.0  # Something went wrong
-    
+
     # Update task progress in memory and on disk
     tasks[task_id]["progress"] = progress
     # Save updated task info to file
@@ -1281,7 +1294,7 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
         if isinstance(task_info_copy.get("updated_at"), datetime):
             task_info_copy["updated_at"] = task_info_copy["updated_at"].isoformat()
         json.dump(task_info_copy, f, default=str)
-    
+
     # Create response
     response = schema.TaskStatusResponse(
         id=task_id,
@@ -1294,7 +1307,7 @@ async def get_task_status(task_id: str = Path(..., description="Task ID")):
         total_iterations=total_iterations,
         best_result=best_result
     )
-    
+
     return response
 
 
@@ -1311,12 +1324,12 @@ async def export_task_data(
         # Try to load task from disk
         task_dir = PathLib(settings.TASK_DIR) / task_id
         task_info_file = task_dir / "task_info.json"
-        
+
         if task_info_file.exists():
             try:
                 with open(task_info_file, "r") as f:
                     task_info = json.load(f)
-                
+
                 # Add to in-memory tasks dictionary
                 tasks[task_id] = task_info
                 logger.debug(f"Loaded task {task_id} from disk for export")
@@ -1325,11 +1338,11 @@ async def export_task_data(
                 raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         else:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # Create export data structure
     task_dir = PathLib(settings.TASK_DIR) / task_id
     export_file = task_dir / f"export.{format}"
-    
+
     # Export data in requested format
     if format.lower() == "json":
         # Load all task data
@@ -1340,7 +1353,7 @@ async def export_task_data(
             "initial_designs": None,
             "results": None,
         }
-        
+
         # Load parameter space
         ps_file = task_dir / "parameter_space.json"
         if ps_file.exists():
@@ -1349,7 +1362,7 @@ async def export_task_data(
                     export_data["parameter_space"] = json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load parameter space for export: {e}", exc_info=False)
-        
+
         # Load strategy
         strategy_file = task_dir / "strategy.json"
         if strategy_file.exists():
@@ -1358,7 +1371,7 @@ async def export_task_data(
                     export_data["strategy"] = json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load strategy for export: {e}", exc_info=False)
-        
+
         # Load initial designs
         designs_file = task_dir / "initial_designs.json"
         if designs_file.exists():
@@ -1367,7 +1380,7 @@ async def export_task_data(
                     export_data["initial_designs"] = json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load initial designs for export: {e}", exc_info=False)
-        
+
         # Load results
         results_file = task_dir / "results.json"
         if results_file.exists():
@@ -1376,15 +1389,15 @@ async def export_task_data(
                     export_data["results"] = json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load results for export: {e}", exc_info=False)
-        
+
         # Save to export file
         with open(export_file, "w") as f:
             json.dump(export_data, f, indent=2, default=str)
-    
+
     elif format.lower() == "csv":
         # CSV export
         import csv
-        
+
         # Load results if they exist
         results = []
         results_file = task_dir / "results.json"
@@ -1394,7 +1407,7 @@ async def export_task_data(
                     results = json.load(f)
             except Exception as e:
                 logger.warning(f"Failed to load results for CSV export: {e}", exc_info=False)
-        
+
         # Create CSV file
         with open(export_file, "w", newline='') as f:
             if not results:
@@ -1411,35 +1424,35 @@ async def export_task_data(
                         all_params.update(result['parameters'].keys())
                     if 'objectives' in result:
                         all_objectives.update(result['objectives'].keys())
-                
+
                 # Create writer and write header
                 writer = csv.writer(f)
                 param_cols = sorted(all_params)
                 obj_cols = sorted(all_objectives)
-                
+
                 header = ["design_id"] + [f"param.{p}" for p in param_cols] + [f"obj.{o}" for o in obj_cols]
                 writer.writerow(header)
-                
+
                 # Write data rows
                 for i, result in enumerate(results):
                     row = [result.get('id', f"design_{i+1}")]
-                    
+
                     # Add parameter values
                     params = result.get('parameters', {})
                     for p in param_cols:
                         row.append(params.get(p, ""))
-                    
+
                     # Add objective values
                     objs = result.get('objectives', {})
                     for o in obj_cols:
                         row.append(objs.get(o, ""))
-                    
+
                     writer.writerow(row)
-    
+
     else:
         # Unsupported format
         raise HTTPException(status_code=400, detail=f"Unsupported export format: {format}")
-    
+
     return FileResponse(
         path=export_file,
         filename=f"task_{task_id}_export.{format}",
@@ -1456,9 +1469,9 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
     if task_id not in tasks:
         await websocket.close(code=1008, reason=f"Task {task_id} not found")
         return
-    
+
     await websocket.accept()
-    
+
     try:
         # Send initial status
         await websocket.send_json({
@@ -1469,13 +1482,13 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str):
                 "timestamp": datetime.now().isoformat(),
             }
         })
-        
+
         # Keep connection alive with periodic pings
         while True:
             # In a real implementation, this would be event-driven
             # For now, just sleep and send a dummy update
             await asyncio.sleep(settings.WS_PING_INTERVAL)
-            
+
             # Send ping to keep connection alive
             await websocket.send_json({
                 "type": "ping",
@@ -1499,7 +1512,7 @@ async def restart_task(
     Restart a BO experiment task after interruption.
     """
     task_dir = PathLib(settings.TASK_DIR) / task_id
-    
+
     # Check if task exists, try to load if not in memory
     if task_id not in tasks:
         task_info_file = task_dir / "task_info.json"
@@ -1513,17 +1526,17 @@ async def restart_task(
                 raise HTTPException(status_code=404, detail=f"Task {task_id} not found or cannot be loaded")
         else:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # Update task status and time
     now = datetime.now()
-    tasks[task_id]["status"] = schema.TaskStatus.RUNNING.value
+    tasks[task_id]["status"] = schema.TaskStatus.OPTIMIZING.value
     tasks[task_id]["updated_at"] = now
-    
+
     # Clean up optimizer instance if it exists
     if task_id in optimizers:
         del optimizers[task_id]
         logger.info(f"Removed existing optimizer for task {task_id}")
-    
+
     # Handle history based on restart strategy
     if restart_config.strategy == "reset":
         if not restart_config.preserve_history:
@@ -1532,7 +1545,7 @@ async def restart_task(
             results_file = task_dir / "results.json"
             with open(results_file, "w") as f:
                 json.dump([], f)
-            
+
             # Reset progress
             tasks[task_id]["progress"] = 0.0
         else:
@@ -1554,7 +1567,7 @@ async def restart_task(
         # Unknown strategy
         logger.warning(f"Unknown restart strategy: {restart_config.strategy}, defaulting to 'continue'")
         # No additional action needed
-    
+
     # Save updated task info
     task_info_file = task_dir / "task_info.json"
     with open(task_info_file, "w") as f:
@@ -1565,7 +1578,7 @@ async def restart_task(
         if isinstance(task_info.get("updated_at"), datetime):
             task_info["updated_at"] = task_info["updated_at"].isoformat()
         json.dump(task_info, f, default=str)
-    
+
     return {
         "message": f"Task {task_id} restarted with strategy: {restart_config.strategy}",
         "preserve_history": restart_config.preserve_history,
@@ -1580,7 +1593,7 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
     Get diagnostics information for debugging.
     """
     task_dir = PathLib(settings.TASK_DIR) / task_id
-    
+
     # Check if task exists, try to load if not in memory
     if task_id not in tasks:
         task_info_file = task_dir / "task_info.json"
@@ -1594,10 +1607,10 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
                 raise HTTPException(status_code=404, detail=f"Task {task_id} not found or cannot be loaded")
         else:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
-    
+
     # Gather diagnostics
     diagnostics = {}
-    
+
     # 1. Check parameter space
     ps_file = task_dir / "parameter_space.json"
     if ps_file.exists():
@@ -1612,12 +1625,12 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
             diagnostics["parameter_space"] = f"error: {str(e)}"
     else:
         diagnostics["parameter_space"] = "not_defined"
-    
+
     # 2. Check if model is trained (has observed results)
     results_file = task_dir / "results.json"
     model_trained = False
     pending_experiments = []
-    
+
     if results_file.exists():
         try:
             with open(results_file, "r") as f:
@@ -1636,14 +1649,14 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
     else:
         diagnostics["model_trained"] = False
         diagnostics["results_count"] = 0
-    
+
     # 3. Check for initial designs
     designs_file = task_dir / "initial_designs.json"
     if designs_file.exists():
         try:
             with open(designs_file, "r") as f:
                 designs_data = json.load(f)
-            
+
             # Check if we have results for each design
             result_ids = set()
             if results_file.exists():
@@ -1655,12 +1668,12 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
                             result_ids.add(r['id'])
                 except Exception:
                     pass
-            
+
             # Find designs without results
             for design in designs_data:
                 if isinstance(design, dict) and 'id' in design and design['id'] not in result_ids:
                     pending_experiments.append(design['id'])
-            
+
             diagnostics["initial_designs_count"] = len(designs_data)
             diagnostics["pending_experiments"] = pending_experiments
         except Exception as e:
@@ -1668,7 +1681,7 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
     else:
         diagnostics["initial_designs_count"] = 0
         diagnostics["pending_experiments"] = []
-    
+
     # 4. Check for strategy
     strategy_file = task_dir / "strategy.json"
     if strategy_file.exists():
@@ -1680,7 +1693,7 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
             diagnostics["strategy"] = f"error: {str(e)}"
     else:
         diagnostics["strategy"] = "not_defined"
-    
+
     # 5. Get recent exception if any
     recent_exception = None
     error_log_file = task_dir / "error.log"
@@ -1692,18 +1705,18 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
                     recent_exception = "".join(last_lines)
         except Exception:
             pass
-    
+
     # 6. Check optimizer instance
     if task_id in optimizers:
         diagnostics["optimizer_in_memory"] = True
     else:
         diagnostics["optimizer_in_memory"] = False
-    
+
     # 7. Get last recommendation time from log or API access time
     last_recommendation_time = None
     # For now, just use current time as a proxy
     last_recommendation_time = datetime.now()
-    
+
     # Return diagnostics
     return schema.Diagnostics(
         parameter_space=diagnostics.get("parameter_space", "unknown"),
@@ -1712,4 +1725,4 @@ async def get_diagnostics(task_id: str = Path(..., description="Task ID")):
         pending_experiments=diagnostics.get("pending_experiments", []),
         last_recommendation_time=last_recommendation_time,
         **{k: v for k, v in diagnostics.items() if k not in ["parameter_space", "model_trained", "pending_experiments"]}
-    ) 
+    )
