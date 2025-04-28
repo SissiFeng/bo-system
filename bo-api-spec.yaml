@@ -1,0 +1,284 @@
+openapi: 3.0.0
+info:
+  title: Catalyst Optimization BO API
+  version: 1.0.0
+  description: API for Bayesian Optimization of Catalyst Experiments
+
+paths:
+  /parameter-space:
+    post:
+      summary: Create a new optimization task
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ParameterSpaceConfig'
+      responses:
+        '200':
+          description: Task created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskCreationResponse'
+  
+  /designs/{task_id}/initial:
+    get:
+      summary: Get initial design points
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: samples
+          in: query
+          schema:
+            type: integer
+            default: 5
+      responses:
+        '200':
+          description: Initial designs retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesignsResponse'
+  
+  /designs/{task_id}/next:
+    get:
+      summary: Get next recommended design points
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: batch_size
+          in: query
+          schema:
+            type: integer
+            default: 1
+      responses:
+        '200':
+          description: Next designs retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DesignsResponse'
+  
+  /results/{task_id}:
+    post:
+      summary: Submit experiment results
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResultsSubmission'
+      responses:
+        '200':
+          description: Results submitted successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResultsSubmissionResponse'
+  
+  /tasks/{task_id}/status:
+    get:
+      summary: Get task status
+      parameters:
+        - name: task_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task status retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskStatusResponse'
+
+components:
+  schemas:
+    ParameterSpaceConfig:
+      type: object
+      required:
+        - name
+        - parameters
+        - objectives
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parameters:
+          type: array
+          items:
+            $ref: '#/components/schemas/Parameter'
+        objectives:
+          type: array
+          items:
+            $ref: '#/components/schemas/Objective'
+        constraints:
+          type: array
+          items:
+            $ref: '#/components/schemas/Constraint'
+    
+    Parameter:
+      type: object
+      required:
+        - name
+        - type
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [continuous, integer, categorical]
+        bounds:
+          type: array
+          items:
+            type: number
+        choices:
+          type: array
+          items:
+            type: string
+        description:
+          type: string
+    
+    Objective:
+      type: object
+      required:
+        - name
+        - direction
+      properties:
+        name:
+          type: string
+        direction:
+          type: string
+          enum: [maximize, minimize]
+        description:
+          type: string
+    
+    Constraint:
+      type: object
+      required:
+        - type
+        - parameters
+        - relation
+        - value
+      properties:
+        type:
+          type: string
+          enum: [sum, product, linear]
+        parameters:
+          type: array
+          items:
+            type: string
+        relation:
+          type: string
+          enum: ["<=", ">=", "=="]
+        value:
+          type: number
+    
+    Design:
+      type: object
+      required:
+        - id
+        - parameters
+      properties:
+        id:
+          type: string
+        parameters:
+          type: object
+          additionalProperties: true
+        predictions:
+          type: object
+          additionalProperties:
+            $ref: '#/components/schemas/Prediction'
+        uncertainty:
+          type: number
+        reason:
+          type: string
+    
+    Prediction:
+      type: object
+      properties:
+        mean:
+          type: number
+        std:
+          type: number
+    
+    ResultSubmit:
+      type: object
+      required:
+        - parameters
+        - objectives
+      properties:
+        parameters:
+          type: object
+          additionalProperties: true
+        objectives:
+          type: object
+          additionalProperties:
+            type: number
+        metadata:
+          type: object
+          additionalProperties: true
+    
+    TaskCreationResponse:
+      type: object
+      properties:
+        task_id:
+          type: string
+        message:
+          type: string
+    
+    DesignsResponse:
+      type: object
+      properties:
+        designs:
+          type: array
+          items:
+            $ref: '#/components/schemas/Design'
+    
+    ResultsSubmission:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/ResultSubmit'
+    
+    ResultsSubmissionResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        results_count:
+          type: integer
+        progress:
+          type: number
+    
+    TaskStatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, configured, generating_initial, ready_for_results, optimizing, paused, completed, failed]
+        progress:
+          type: number
+        current_iteration:
+          type: integer
+        total_iterations:
+          type: integer
+        best_result:
+          type: object

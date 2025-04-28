@@ -1,0 +1,112 @@
+[
+  {
+    "id": "d0ec6c79",
+    "parameters": {
+      "Ni_ratio": 0.054253713494015005,
+      "Co_ratio": 0.7267122716554728,
+      "Fe_ratio": 0.2087095868638114,
+      "electrolyte_concentration": 0.2910073241108657,
+      "current_density": 18.46947993599703,
+      "deposition_time": 89.43859309182288,
+      "precursor_pH": 2.0163404211263085,
+      "sintering_temperature": 881,
+      "material_system": "Ni-Co",
+      "washing_method": "None",
+      "ultrasound_treatment": "no",
+      "precursor_type": "sulfate"
+    },
+    "objectives": {
+      "LSV_slope": 12.688473179600107,
+      "CV_stability": 2.7664165822844176
+    },
+    "timestamp": "2025-04-28T13:17:01.169190"
+  },
+  {
+    "id": "92d1a1f2",
+    "parameters": {
+      "Ni_ratio": 0.0421407339218149,
+      "Co_ratio": 0.4897192420618642,
+      "Fe_ratio": 0.2690014732197807,
+      "electrolyte_concentration": 1.7101785600735053,
+      "current_density": 42.00772845716946,
+      "deposition_time": 597.7821121226732,
+      "precursor_pH": 10.107334411972026,
+      "sintering_temperature": 505,
+      "material_system": "Co-Fe",
+      "washing_method": "None",
+      "ultrasound_treatment": "no",
+      "precursor_type": "chloride"
+    },
+    "objectives": {
+      "LSV_slope": 8.604744944315536,
+      "CV_stability": 9.35115220655631
+    },
+    "timestamp": "2025-04-28T13:17:01.169254"
+  },
+  {
+    "id": "bd446ff5",
+    "parameters": {
+      "Ni_ratio": 0.2856077144484089,
+      "Co_ratio": 0.5977349445161505,
+      "Fe_ratio": 0.0848609866808121,
+      "electrolyte_concentration": 0.8541122885555319,
+      "current_density": 40.35985362294372,
+      "deposition_time": 401.9382287146476,
+      "precursor_pH": 7.296756228938897,
+      "sintering_temperature": 439,
+      "material_system": "Ni-Fe",
+      "washing_method": "DI_water",
+      "ultrasound_treatment": "no",
+      "precursor_type": "sulfate"
+    },
+    "objectives": {
+      "LSV_slope": 11.179833224847453,
+      "CV_stability": 2.3624069535460945
+    },
+    "timestamp": "2025-04-28T13:17:01.169279"
+  },
+  {
+    "id": "cf1d0fa3",
+    "parameters": {
+      "Ni_ratio": 0.18716744457363454,
+      "Co_ratio": 0.5761515218829673,
+      "Fe_ratio": 0.04311237725130486,
+      "electrolyte_concentration": 0.6898385227140936,
+      "current_density": 33.03725111381938,
+      "deposition_time": 276.98982138929335,
+      "precursor_pH": 3.016018847511259,
+      "sintering_temperature": 569,
+      "material_system": "Ni-Co",
+      "washing_method": "DI_water",
+      "ultrasound_treatment": "yes",
+      "precursor_type": "chloride"
+    },
+    "objectives": {
+      "LSV_slope": 12.150661312979794,
+      "CV_stability": 2.661831774178406
+    },
+    "timestamp": "2025-04-28T13:17:01.169305"
+  },
+  {
+    "id": "81e94076",
+    "parameters": {
+      "Ni_ratio": 0.156391640910367,
+      "Co_ratio": 0.356152389061624,
+      "Fe_ratio": 0.3393815666329991,
+      "electrolyte_concentration": 1.6892911026802886,
+      "current_density": 39.87297230210713,
+      "deposition_time": 451.52798815185594,
+      "precursor_pH": 1.1366763270424767,
+      "sintering_temperature": 551,
+      "material_system": "Ni-Co",
+      "washing_method": "Ethanol",
+      "ultrasound_treatment": "yes",
+      "precursor_type": "acetate"
+    },
+    "objectives": {
+      "LSV_slope": 10.784505740892886,
+      "CV_stability": 3.8326469946057373
+    },
+    "timestamp": "2025-04-28T13:17:01.169328"
+  }
+]

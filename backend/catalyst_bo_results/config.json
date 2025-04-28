@@ -5,73 +5,113 @@
     {
       "name": "Ni_ratio",
       "type": "continuous",
-      "bounds": [0.0, 0.8],
+      "bounds": [
+        0.0,
+        0.8
+      ],
       "description": "Nickel element ratio"
     },
     {
       "name": "Co_ratio",
       "type": "continuous",
-      "bounds": [0.0, 0.8],
+      "bounds": [
+        0.0,
+        0.8
+      ],
       "description": "Cobalt element ratio"
     },
     {
       "name": "Fe_ratio",
       "type": "continuous",
-      "bounds": [0.0, 0.8],
+      "bounds": [
+        0.0,
+        0.8
+      ],
       "description": "Iron element ratio"
     },
     {
       "name": "sintering_temperature",
       "type": "integer",
-      "bounds": [400, 900],
-      "description": "Sintering temperature (°C)"
+      "bounds": [
+        400,
+        900
+      ],
+      "description": "Sintering temperature (\u00b0C)"
     },
     {
       "name": "electrolyte_concentration",
       "type": "continuous",
-      "bounds": [0.1, 2.0],
+      "bounds": [
+        0.1,
+        2.0
+      ],
       "description": "Electrolyte concentration (mol/L)"
     },
     {
       "name": "current_density",
       "type": "continuous",
-      "bounds": [5, 50],
-      "description": "Current density (mA/cm²)"
+      "bounds": [
+        5,
+        50
+      ],
+      "description": "Current density (mA/cm\u00b2)"
     },
     {
       "name": "deposition_time",
       "type": "continuous",
-      "bounds": [30, 600],
+      "bounds": [
+        30,
+        600
+      ],
       "description": "Deposition time (seconds)"
     },
     {
       "name": "precursor_pH",
       "type": "continuous",
-      "bounds": [1.0, 12.0],
+      "bounds": [
+        1.0,
+        12.0
+      ],
       "description": "Precursor solution pH"
     },
     {
       "name": "material_system",
       "type": "categorical",
-      "choices": ["Ni-Co", "Ni-Fe", "Co-Fe"],
+      "choices": [
+        "Ni-Co",
+        "Ni-Fe",
+        "Co-Fe"
+      ],
       "description": "Binary material system"
     },
     {
       "name": "washing_method",
       "type": "categorical",
-      "choices": ["DI_water", "Ethanol", "None"],
+      "choices": [
+        "DI_water",
+        "Ethanol",
+        "None"
+      ],
       "description": "Post-deposition washing method"
     },
     {
       "name": "ultrasound_treatment",
       "type": "categorical",
-      "choices": ["yes", "no"],
+      "choices": [
+        "yes",
+        "no"
+      ],
       "description": "Whether ultrasound treatment was applied"
     },
     {
       "name": "precursor_type",
       "type": "categorical",
-      "choices": ["nitrate", "chloride", "sulfate", "acetate"],
+      "choices": [
+        "nitrate",
+        "chloride",
+        "sulfate",
+        "acetate"
+      ],
       "description": "Type of metal salt precursor used"
     }
   ],
@@ -90,7 +130,11 @@
   "constraints": [
     {
       "type": "sum",
-      "parameters": ["Ni_ratio", "Co_ratio", "Fe_ratio"],
+      "parameters": [
+        "Ni_ratio",
+        "Co_ratio",
+        "Fe_ratio"
+      ],
       "relation": "<=",
       "value": 1.0
     }
